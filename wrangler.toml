@@ -1,21 +1,3 @@
 name = "your-worker-name"
 main = "src/index.js"
 compatibility_date = "2024-01-14"
-
-[vars]
-# Public variables go here if needed
-
-# Your secret API key (this references the secret you've already set)
-[[unsafe.bindings]]
-name = "publicai"
-type = "secret"
-```
-
-**Important:** Your `env.publicai` secret should already be configured in Cloudflare dashboard (Workers & Pages → your worker → Settings → Variables). The wrangler.toml just documents that it exists - you don't put the actual key value in the file.
-
-## 4. Optional: Add `.gitignore`
-```
-node_modules/
-.wrangler/
-.dev.vars
-.env
