@@ -21,8 +21,8 @@ export default {
       "Vary": "Origin"
     };
 
-    if (origin && !allowedOrigins.includes(origin)) {
-      return new Response("Forbidden", { status: 403 });
+    if (allowedOrigins.includes(origin)) {
+      cors["Access-Control-Allow-Origin"] = origin;
     }
 
     // Preflight
