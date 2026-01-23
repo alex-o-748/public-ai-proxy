@@ -111,6 +111,19 @@ export default {
     }
     // =========================
 
+    // Check if API key is configured
+    if (!env.publicai) {
+      return new Response(
+        JSON.stringify({
+          error: "Proxy configuration error: PublicAI API key not set. Please configure the 'publicai' secret in Cloudflare Workers."
+        }),
+        {
+          status: 500,
+          headers: { ...cors, "Content-Type": "application/json" }
+        }
+      );
+    }
+
     // Forward to PublicAI
     const upstream = await fetch(
       "https://api.publicai.co/v1/chat/completions",
