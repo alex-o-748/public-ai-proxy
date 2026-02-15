@@ -5,8 +5,32 @@ const WINDOW_MS = 60_000;    // per minute
 // Best-effort per-IP buckets (free, in-memory)
 const ipBuckets = new Map();
 
+// ===== Neon SQL-over-HTTP helper =====
+// Parses a postgres:// connection string and calls Neon's HTTP endpoint.
+// No npm packages needed — just fetch().
+// Set DATABASE_URL as a Cloudflare secret, e.g.:
+//   postgres://user:pass@ep-cool-123.us-east-2.aws.neon.tech/dbname?sslmode=require
+async function queryNeon(databaseUrl, sql, params = []) {
+  const host = new URL(databaseUrl).hostname;
+
+  const resp = await fetch(`https://${host}/sql`, {
+    method: "POST",
+    headers: {
+      "Neon-Connection-String": databaseUrl,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ query: sql, params }),
+  });
+
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(`Neon HTTP error ${resp.status}: ${text}`);
+  }
+  return resp.json();
+}
+
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     const origin = request.headers.get("Origin") || "";
 
     const allowedOrigins = [
@@ -125,6 +149,17 @@ export default {
         body: request.body
       }
     );
+
+    // Log request to Neon (non-blocking — runs after response is sent)
+    if (env.DATABASE_URL) {
+      ctx.waitUntil(
+        queryNeon(
+          env.DATABASE_URL,
+          "INSERT INTO requests (ip, status, created_at) VALUES ($1, $2, NOW())",
+          [ip, upstream.status]
+        ).catch(() => {}) // swallow errors so logging never breaks the proxy
+      );
+    }
 
     const headers = new Headers(cors);
     const ct = upstream.headers.get("content-type");
