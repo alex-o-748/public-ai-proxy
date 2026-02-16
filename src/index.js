@@ -50,12 +50,22 @@ export default {
       cors["Access-Control-Allow-Origin"] = origin;
     }
 
-    // Preflight
+    const url = new URL(request.url);
+
+    // Preflight — /log needs open CORS since it's called from Wikipedia
     if (request.method === "OPTIONS") {
+      if (url.pathname === '/log') {
+        return new Response(null, {
+          status: 204,
+          headers: {
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'POST',
+            'Access-Control-Allow-Headers': 'Content-Type',
+          }
+        });
+      }
       return new Response(null, { status: 204, headers: cors });
     }
-
-    const url = new URL(request.url);
     const corsHeaders = {
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
@@ -85,6 +95,24 @@ export default {
           headers: { ...corsHeaders, 'Content-Type': 'application/json' }
         });
       }
+    }
+
+    // ===== /log endpoint — write verification results to Neon =====
+    if (url.pathname === '/log' && request.method === 'POST') {
+      const body = await request.json();
+      ctx.waitUntil(
+        queryNeon(
+          env.DATABASE_URL,
+          `INSERT INTO verification_logs
+            (article_url, article_title, citation_number, source_url, provider, verdict, confidence)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+          [body.article_url, body.article_title, body.citation_number,
+           body.source_url, body.provider, body.verdict, body.confidence]
+        ).catch(err => console.error('Log write failed:', err.message))
+      );
+      return new Response('ok', {
+        headers: { 'Access-Control-Allow-Origin': '*' }
+      });
     }
 
     // NEW: Handle URL fetch requests
@@ -174,17 +202,6 @@ export default {
         body: request.body
       }
     );
-
-    // Log request to Neon (non-blocking — runs after response is sent)
-    if (env.DATABASE_URL) {
-      ctx.waitUntil(
-        queryNeon(
-          env.DATABASE_URL,
-          "INSERT INTO requests (ip, status, created_at) VALUES ($1, $2, NOW())",
-          [ip, upstream.status]
-        ).catch((e) => console.error("Neon log failed:", e.message))
-      );
-    }
 
     const headers = new Headers(cors);
     const ct = upstream.headers.get("content-type");
