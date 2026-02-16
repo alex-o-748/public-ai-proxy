@@ -62,6 +62,31 @@ export default {
       'Access-Control-Allow-Headers': 'Content-Type',
     };
 
+    // DEBUG: Test Neon connection — visit ?neon=test in your browser
+    // Remove this block once logging is confirmed working
+    if (request.method === 'GET' && url.searchParams.get('neon') === 'test') {
+      if (!env.DATABASE_URL) {
+        return new Response(JSON.stringify({ error: "DATABASE_URL secret is not set" }), {
+          status: 500,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
+      }
+      try {
+        const result = await queryNeon(
+          env.DATABASE_URL,
+          "SELECT NOW() AS server_time, current_database() AS db"
+        );
+        return new Response(JSON.stringify({ ok: true, result }), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
+      } catch (e) {
+        return new Response(JSON.stringify({ ok: false, error: e.message }), {
+          status: 500,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
+      }
+    }
+
     // NEW: Handle URL fetch requests
     if (request.method === 'GET' && url.searchParams.has('fetch')) {
       const targetUrl = url.searchParams.get('fetch');
@@ -157,7 +182,7 @@ export default {
           env.DATABASE_URL,
           "INSERT INTO requests (ip, status, created_at) VALUES ($1, $2, NOW())",
           [ip, upstream.status]
-        ).catch(() => {}) // swallow errors so logging never breaks the proxy
+        ).catch((e) => console.error("Neon log failed:", e.message))
       );
     }
 
