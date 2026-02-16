@@ -35,7 +35,7 @@ export default {
 
     const allowedOrigins = [
       "https://en.wikipedia.org",
-      "https://www.wikipedia.org"
+      "https://www.wikipedia.org",
       "https://commons.wikimedia.org"
     ];
 
