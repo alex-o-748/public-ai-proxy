@@ -50,17 +50,70 @@ export default {
       cors["Access-Control-Allow-Origin"] = origin;
     }
 
-    // Preflight
+    const url = new URL(request.url);
+
+    // Preflight — /log needs open CORS since it's called from Wikipedia
     if (request.method === "OPTIONS") {
+      if (url.pathname === '/log') {
+        return new Response(null, {
+          status: 204,
+          headers: {
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Methods': 'POST',
+            'Access-Control-Allow-Headers': 'Content-Type',
+          }
+        });
+      }
       return new Response(null, { status: 204, headers: cors });
     }
-
-    const url = new URL(request.url);
     const corsHeaders = {
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type',
     };
+
+    // DEBUG: Test Neon connection — visit ?neon=test in your browser
+    // Remove this block once logging is confirmed working
+    if (request.method === 'GET' && url.searchParams.get('neon') === 'test') {
+      if (!env.DATABASE_URL) {
+        return new Response(JSON.stringify({ error: "DATABASE_URL secret is not set" }), {
+          status: 500,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
+      }
+      try {
+        const result = await queryNeon(
+          env.DATABASE_URL,
+          "SELECT NOW() AS server_time, current_database() AS db"
+        );
+        return new Response(JSON.stringify({ ok: true, result }), {
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
+      } catch (e) {
+        return new Response(JSON.stringify({ ok: false, error: e.message }), {
+          status: 500,
+          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+        });
+      }
+    }
+
+    // ===== /log endpoint — write verification results to Neon =====
+    if (url.pathname === '/log' && request.method === 'POST') {
+      const body = await request.json();
+      ctx.waitUntil(
+        queryNeon(
+          env.DATABASE_URL,
+          `INSERT INTO verification_logs
+            (article_url, article_title, citation_number, source_url, provider, verdict, confidence)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+          [body.article_url, body.article_title, body.citation_number,
+           body.source_url, body.provider, body.verdict, body.confidence]
+        ).catch(err => console.error('Log write failed:', err.message))
+      );
+      return new Response('ok', {
+        headers: { 'Access-Control-Allow-Origin': '*' }
+      });
+    }
 
     // NEW: Handle URL fetch requests
     if (request.method === 'GET' && url.searchParams.has('fetch')) {
@@ -149,17 +202,6 @@ export default {
         body: request.body
       }
     );
-
-    // Log request to Neon (non-blocking — runs after response is sent)
-    if (env.DATABASE_URL) {
-      ctx.waitUntil(
-        queryNeon(
-          env.DATABASE_URL,
-          "INSERT INTO requests (ip, status, created_at) VALUES ($1, $2, NOW())",
-          [ip, upstream.status]
-        ).catch(() => {}) // swallow errors so logging never breaks the proxy
-      );
-    }
 
     const headers = new Headers(cors);
     const ct = upstream.headers.get("content-type");
