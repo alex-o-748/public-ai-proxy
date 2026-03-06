@@ -40,7 +40,7 @@ export default {
     ];
 
     const cors = {
-      "Access-Control-Allow-Methods": "POST, OPTIONS",
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
       "Access-Control-Allow-Headers":
         request.headers.get("Access-Control-Request-Headers") || "Content-Type",
       "Vary": "Origin"
@@ -71,6 +71,20 @@ export default {
       'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type',
     };
+
+    // DEBUG: Reachability check — visit ?ping in your browser or from Wikipedia console:
+    // fetch('https://<your-worker>.workers.dev/?ping').then(r=>r.json()).then(console.log)
+    if (request.method === 'GET' && url.searchParams.has('ping')) {
+      return new Response(JSON.stringify({
+        ok: true,
+        timestamp: new Date().toISOString(),
+        origin: origin || '(none)',
+        ip: request.headers.get('CF-Connecting-IP') || '(unknown)',
+        corsAllowed: allowedOrigins.includes(origin),
+      }, null, 2), {
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+      });
+    }
 
     // DEBUG: Test Neon connection — visit ?neon=test in your browser
     // Remove this block once logging is confirmed working
@@ -154,8 +168,10 @@ export default {
           });
           
       } catch (e) {
-          return new Response(JSON.stringify({ 
-              error: e.name === 'AbortError' ? 'Request timeout' : e.message 
+          console.error('fetch handler error:', e.name, e.message, 'target:', targetUrl);
+          return new Response(JSON.stringify({
+              error: e.name === 'AbortError' ? 'Request timeout' : e.message,
+              errorType: e.name,
           }), {
               headers: { ...corsHeaders, 'Content-Type': 'application/json' }
           });
