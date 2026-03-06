@@ -40,7 +40,7 @@ export default {
     ];
 
     const cors = {
-      "Access-Control-Allow-Methods": "POST, OPTIONS",
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
       "Access-Control-Allow-Headers":
         request.headers.get("Access-Control-Request-Headers") || "Content-Type",
       "Vary": "Origin"
