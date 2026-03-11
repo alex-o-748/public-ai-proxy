@@ -1,3 +1,5 @@
+import { extractText as extractPdfText, getDocumentProxy } from "unpdf";
+
 // ===== Rate limit settings =====
 const RATE_LIMIT = 20;        // requests
 const WINDOW_MS = 60_000;    // per minute
@@ -132,7 +134,8 @@ export default {
     // NEW: Handle URL fetch requests
     if (request.method === 'GET' && url.searchParams.has('fetch')) {
       const targetUrl = url.searchParams.get('fetch');
-      
+      const pageParam = url.searchParams.get('page'); // optional: specific page number (1-indexed)
+
       // Basic validation
       if (!targetUrl || !targetUrl.startsWith('http')) {
           return new Response(JSON.stringify({ error: 'Invalid URL' }), {
@@ -140,33 +143,74 @@ export default {
               headers: { ...corsHeaders, 'Content-Type': 'application/json' }
           });
       }
-      
+
       try {
           const controller = new AbortController();
           const timeout = setTimeout(() => controller.abort(), 10000);
-          
+
           const response = await fetch(targetUrl, {
               signal: controller.signal,
               headers: {
                   'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                  'Accept': 'text/html,application/xhtml+xml',
+                  'Accept': 'text/html,application/xhtml+xml,application/pdf,*/*',
               }
           });
           clearTimeout(timeout);
-          
+
           if (!response.ok) {
               return new Response(JSON.stringify({ error: `Source returned ${response.status}` }), {
                   headers: { ...corsHeaders, 'Content-Type': 'application/json' }
               });
           }
-          
+
+          const contentType = (response.headers.get('Content-Type') || '').toLowerCase();
+          const isPdf = contentType.includes('application/pdf') || targetUrl.endsWith('.pdf');
+
+          if (isPdf) {
+              const buf = await response.arrayBuffer();
+              // 10 MB guard — skip oversized PDFs
+              if (buf.byteLength > 10 * 1024 * 1024) {
+                  return new Response(JSON.stringify({ error: 'PDF too large (>10 MB)' }), {
+                      headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+                  });
+              }
+
+              const pdf = await getDocumentProxy(new Uint8Array(buf));
+
+              let pages;
+              if (pageParam) {
+                  const pageNum = parseInt(pageParam, 10);
+                  if (isNaN(pageNum) || pageNum < 1 || pageNum > pdf.numPages) {
+                      return new Response(JSON.stringify({
+                          error: `Invalid page number. PDF has ${pdf.numPages} pages.`
+                      }), {
+                          status: 400,
+                          headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+                      });
+                  }
+                  pages = [pageNum];
+              }
+
+              const { text } = await extractPdfText(pdf, { mergePages: true, pages });
+              const content = text.replace(/\s+/g, ' ').trim().substring(0, 12000);
+
+              return new Response(JSON.stringify({
+                  content,
+                  pdf: true,
+                  totalPages: pdf.numPages,
+                  ...(pageParam ? { page: parseInt(pageParam, 10) } : {}),
+              }), {
+                  headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+              });
+          }
+
           const html = await response.text();
           const content = extractText(html);
-          
+
           return new Response(JSON.stringify({ content }), {
               headers: { ...corsHeaders, 'Content-Type': 'application/json' }
           });
-          
+
       } catch (e) {
           console.error('fetch handler error:', e.name, e.message, 'target:', targetUrl);
           return new Response(JSON.stringify({
