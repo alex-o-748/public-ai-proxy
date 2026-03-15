@@ -1,0 +1,454 @@
+openapi: 3.1.0
+info:
+  title: Public AI Proxy
+  version: 1.0.0
+  description: |
+    A Cloudflare Worker that proxies requests to the PublicAI LLM API with
+    rate limiting, CORS enforcement, URL content extraction, and citation
+    verification logging for Wikipedia tooling.
+
+servers:
+  - url: https://public-ai-proxy.wmcloud.org
+    description: Production
+
+paths:
+  /:
+    post:
+      operationId: chatCompletion
+      summary: Proxy a chat completion request to PublicAI
+      description: |
+        Forwards the request body directly to the PublicAI
+        `/v1/chat/completions` endpoint and streams the response back.
+        Subject to per-IP rate limiting (20 req / 60 s).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatCompletionRequest'
+      responses:
+        '200':
+          description: Successful chat completion (streaming or non-streaming)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChatCompletionResponse'
+            text/event-stream:
+              schema:
+                type: string
+                description: Server-sent events stream of completion chunks
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '4XX':
+          $ref: '#/components/responses/UpstreamError'
+        '5XX':
+          $ref: '#/components/responses/UpstreamError'
+
+    get:
+      operationId: fetchOrPing
+      summary: Fetch URL content or run a diagnostic check
+      description: |
+        Behaviour depends on which query parameter is provided:
+
+        - `?fetch=<url>` — downloads the target URL, extracts plain text from
+          HTML or PDF, and returns up to 12 000 characters.
+        - `?fetch=<url>&page=<n>` — same as above but returns only page *n*
+          of a PDF (1-indexed).
+        - `?ping` — returns basic reachability / CORS debug information.
+        - `?neon=test` — verifies the Neon database connection.
+
+        Exactly one of these parameter combinations should be provided.
+      parameters:
+        - name: fetch
+          in: query
+          description: Absolute URL of the resource to fetch and extract text from.
+          required: false
+          schema:
+            type: string
+            format: uri
+            example: https://example.com/paper.pdf
+        - name: page
+          in: query
+          description: >
+            1-indexed page number to extract from a PDF. Only meaningful when
+            `fetch` points to a PDF.
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            example: 2
+        - name: ping
+          in: query
+          description: >
+            When present (any value, including empty string), returns a ping /
+            CORS diagnostic response instead of fetching content.
+          required: false
+          schema:
+            type: string
+        - name: neon
+          in: query
+          description: >
+            Set to `test` to run a Neon database connectivity check.
+          required: false
+          schema:
+            type: string
+            enum: [test]
+      responses:
+        '200':
+          description: >
+            Response shape depends on the query parameter used.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/FetchHtmlResponse'
+                  - $ref: '#/components/schemas/FetchPdfResponse'
+                  - $ref: '#/components/schemas/PingResponse'
+                  - $ref: '#/components/schemas/NeonTestResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '502':
+          $ref: '#/components/responses/FetchError'
+
+    options:
+      operationId: corsPreflightRoot
+      summary: CORS preflight for /
+      responses:
+        '204':
+          description: CORS preflight accepted
+          headers:
+            Access-Control-Allow-Origin:
+              schema:
+                type: string
+            Access-Control-Allow-Methods:
+              schema:
+                type: string
+            Access-Control-Allow-Headers:
+              schema:
+                type: string
+
+  /log:
+    post:
+      operationId: logVerification
+      summary: Log a citation verification result
+      description: |
+        Persists a citation verification result to the Neon PostgreSQL
+        `verification_logs` table. The write is non-blocking (Cloudflare
+        `waitUntil`). This endpoint has open CORS (`*`) to allow Wikipedia
+        cross-origin requests.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VerificationLogRequest'
+      responses:
+        '200':
+          description: Log entry accepted
+          content:
+            text/plain:
+              schema:
+                type: string
+                enum: [ok]
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+    options:
+      operationId: corsPreflightLog
+      summary: CORS preflight for /log
+      responses:
+        '204':
+          description: CORS preflight accepted
+
+components:
+  schemas:
+    # ── Chat completion (pass-through to PublicAI / OpenAI-compatible) ─────────
+
+    ChatCompletionRequest:
+      type: object
+      description: >
+        OpenAI-compatible chat completion request. The proxy forwards this body
+        verbatim to PublicAI.
+      required:
+        - model
+        - messages
+      properties:
+        model:
+          type: string
+          example: gpt-4o
+        messages:
+          type: array
+          items:
+            $ref: '#/components/schemas/ChatMessage'
+        stream:
+          type: boolean
+          default: false
+        temperature:
+          type: number
+          minimum: 0
+          maximum: 2
+        max_tokens:
+          type: integer
+          minimum: 1
+        top_p:
+          type: number
+        frequency_penalty:
+          type: number
+        presence_penalty:
+          type: number
+      additionalProperties: true
+
+    ChatMessage:
+      type: object
+      required:
+        - role
+        - content
+      properties:
+        role:
+          type: string
+          enum: [system, user, assistant, tool]
+        content:
+          oneOf:
+            - type: string
+            - type: array
+              items:
+                type: object
+                additionalProperties: true
+
+    ChatCompletionResponse:
+      type: object
+      description: OpenAI-compatible chat completion response from PublicAI.
+      properties:
+        id:
+          type: string
+        object:
+          type: string
+          example: chat.completion
+        created:
+          type: integer
+        model:
+          type: string
+        choices:
+          type: array
+          items:
+            type: object
+            properties:
+              index:
+                type: integer
+              message:
+                $ref: '#/components/schemas/ChatMessage'
+              finish_reason:
+                type: string
+        usage:
+          type: object
+          properties:
+            prompt_tokens:
+              type: integer
+            completion_tokens:
+              type: integer
+            total_tokens:
+              type: integer
+      additionalProperties: true
+
+    # ── Content fetch ──────────────────────────────────────────────────────────
+
+    FetchHtmlResponse:
+      type: object
+      description: Extracted plain-text content from an HTML page.
+      required:
+        - content
+      properties:
+        content:
+          type: string
+          maxLength: 12000
+          description: Plain text extracted from the HTML page (scripts, styles, nav, header, and footer removed).
+          example: "Wikipedia is a free online encyclopedia..."
+
+    FetchPdfResponse:
+      type: object
+      description: Extracted plain-text content from a PDF document.
+      required:
+        - content
+        - pdf
+        - totalPages
+      properties:
+        content:
+          type: string
+          maxLength: 12000
+          description: Plain text extracted from the PDF.
+        pdf:
+          type: boolean
+          enum: [true]
+        totalPages:
+          type: integer
+          description: Total number of pages in the PDF.
+          example: 12
+        page:
+          type: integer
+          description: The page number that was extracted (only present when the `page` query parameter was used).
+          example: 2
+
+    # ── Diagnostics ────────────────────────────────────────────────────────────
+
+    PingResponse:
+      type: object
+      description: Reachability and CORS debug information.
+      required:
+        - ok
+        - timestamp
+        - origin
+        - ip
+        - corsAllowed
+      properties:
+        ok:
+          type: boolean
+          example: true
+        timestamp:
+          type: string
+          format: date-time
+          example: "2026-03-15T12:00:00.000Z"
+        origin:
+          type: string
+          description: Value of the `Origin` request header, or `"(none)"` if absent.
+          example: "https://en.wikipedia.org"
+        ip:
+          type: string
+          description: Client IP address from the `CF-Connecting-IP` header.
+          example: "203.0.113.42"
+        corsAllowed:
+          type: boolean
+          description: Whether the request origin is in the allowlist.
+          example: true
+
+    NeonTestResponse:
+      type: object
+      description: Result of a Neon database connectivity check.
+      required:
+        - ok
+      properties:
+        ok:
+          type: boolean
+        result:
+          type: object
+          description: Present when `ok` is `true`.
+          required:
+            - server_time
+            - db
+          properties:
+            server_time:
+              type: string
+              format: date-time
+            db:
+              type: string
+              description: Database name.
+        error:
+          type: string
+          description: Error message when `ok` is `false`.
+
+    # ── Verification logging ───────────────────────────────────────────────────
+
+    VerificationLogRequest:
+      type: object
+      description: Citation verification result to persist.
+      required:
+        - article_url
+        - article_title
+        - citation_number
+        - source_url
+        - provider
+        - verdict
+        - confidence
+      properties:
+        article_url:
+          type: string
+          format: uri
+          description: Canonical URL of the Wikipedia article containing the citation.
+          example: "https://en.wikipedia.org/wiki/Eiffel_Tower"
+        article_title:
+          type: string
+          description: Title of the Wikipedia article.
+          example: "Eiffel Tower"
+        citation_number:
+          type: integer
+          minimum: 1
+          description: 1-indexed position of the citation within the article.
+          example: 3
+        source_url:
+          type: string
+          format: uri
+          description: URL of the cited source that was verified.
+          example: "https://example.com/source-article"
+        provider:
+          type: string
+          description: Identifier of the LLM / service that performed the verification.
+          example: "publicai/gpt-4o"
+        verdict:
+          type: string
+          description: Verification outcome.
+          enum: [supports, refutes, not_enough_info, error]
+          example: "supports"
+        confidence:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 1
+          description: Model's confidence score for the verdict.
+          example: 0.92
+
+    # ── Shared error shape ─────────────────────────────────────────────────────
+
+    ErrorResponse:
+      type: object
+      required:
+        - error
+      properties:
+        error:
+          type: string
+          description: Human-readable description of the error.
+          example: "fetch failed: timeout"
+        errorType:
+          type: string
+          description: Optional error class name (e.g. `AbortError`).
+          example: "AbortError"
+
+  responses:
+    BadRequest:
+      description: Bad request — missing or invalid parameters.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+    RateLimited:
+      description: Rate limit exceeded (20 requests per 60 seconds per IP).
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+          example:
+            error: "rate limit exceeded"
+
+    FetchError:
+      description: The upstream URL could not be fetched or parsed.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+    UpstreamError:
+      description: PublicAI returned a non-2xx response; status code is forwarded.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
+
+    InternalError:
+      description: Unexpected server error.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ErrorResponse'
