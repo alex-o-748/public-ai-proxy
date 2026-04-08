@@ -192,7 +192,7 @@ export default {
               }
 
               const { text } = await extractPdfText(pdf, { mergePages: true, pages });
-              const content = text.replace(/\s+/g, ' ').trim().substring(0, 12000);
+              const content = text.replace(/\s+/g, ' ').trim().substring(0, 20000);
 
               return new Response(JSON.stringify({
                   content,
@@ -288,5 +288,5 @@ function extractText(html) {
     .replace(/&gt;/g, '>')
     .replace(/\s+/g, ' ')
     .trim()
-    .substring(0, 12000);
+    .substring(0, 20000);
 }
