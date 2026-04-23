@@ -225,8 +225,11 @@ function extractRelevantContent(text, query, options) {
         return { text: '', truncated: false, matches: 0, fullLength: 0, strategy: 'short' };
     }
 
-    // No reduction needed: short enough to send whole.
-    if (fullLength <= opts.maxTotalChars && (!query || fullLength <= opts.leadChars + opts.matchWindow)) {
+    // No reduction needed: the whole source fits in the LLM budget. Narrowing
+    // to excerpts here would drop context from paragraphs that don't lexically
+    // match the claim but still inform it, at zero token-cost benefit. Only
+    // reduce when we actually have to.
+    if (fullLength <= opts.maxTotalChars) {
         return { text, truncated: false, matches: 0, fullLength, strategy: 'short' };
     }
 
