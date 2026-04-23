@@ -95,11 +95,17 @@ function check(name, cond, info) {
 
     check('issue #88: surfaces conclusion', out.text.includes('Belgium increased by 12%'));
     check('issue #88: lead present', out.text.includes('Background sentence'));
-    check('issue #88: filler bulk dropped',
-          !out.text.includes('Filler about other topics. '.repeat(50)));
-    check('issue #88: strategy is lead+matches', out.strategy === 'lead+matches');
+    // Post-density-fix: when lead+matches would otherwise be sparse, we
+    // backfill with head-of-remainder. The conclusion + lead are still the
+    // priority but some filler comes along for density. Check that filler
+    // doesn't dominate (the matched paragraph should still be prominent).
+    check('issue #88: strategy is lead+matches(+backfill)',
+          out.strategy === 'lead+matches' || out.strategy === 'lead+matches+backfill',
+          `strategy=${out.strategy}`);
     check('issue #88: respects 12k cap', out.text.length <= 12500);
     check('issue #88: truncated=true', out.truncated === true);
+    check('issue #88: output near budget (backfill active)', out.text.length >= 9000,
+          `length=${out.text.length}`);
 }
 
 // 6. Backward compat: a request with no `query` param sees the same

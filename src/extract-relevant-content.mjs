@@ -36,11 +36,73 @@ const DEFAULTS = Object.freeze({
     maxMatches: 8,          // cap distinct matches returned
     maxTotalChars: 9000,    // hard cap on total returned text
     fallbackChars: 5000,    // when no query or no matches, return head of page
+    // Pages whose full text is at most (shortTolerance × maxTotalChars)
+    // bypass query-aware narrowing and are delivered via the fallback
+    // first-N-chars slice. Rationale: for modestly-over-budget pages the
+    // first-N slice is a perfectly reasonable summary that reliably avoids
+    // the density-collapse risk of lead+head+tail on nav-heavy HTML.
+    shortTolerance: 1.5,
+    // If lead + query matches consume less than this fraction of the
+    // budget, pad with head-of-remainder up to budget. Prevents emitting
+    // tiny excerpts (eg 1,400 chars in a 12k budget) that look like
+    // source-unavailability signals to some LLMs.
+    minFillRatio: 0.7,
 });
 
 // Escape a string for safe use inside a RegExp.
 function escapeRegExp(s) {
     return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// Collapse runs of blank lines down to a single blank line without touching
+// paragraph boundaries. Paragraph-preserving HTML-to-text extraction tends
+// to produce long stacks of "\n \n \n" between every element; those stacks
+// eat budget without carrying information.
+function collapseBlankLines(s) {
+    if (!s) return s;
+    return s.replace(/\n[ \t]*(?:\n[ \t]*){2,}/g, '\n\n');
+}
+
+// Known wrapper-chrome patterns that models read as unreliability signals.
+// Each entry is tested in order; first match wins. Each callback takes the
+// raw text and returns the sliced text (or the original if no match).
+const CHROME_STRIPPERS = [
+    // web.archive.org Wayback Machine capture preamble. The line
+    // "The Wayback Machine - https://web.archive.org/web/<timestamp>/<url>"
+    // reliably separates capture metadata (which often contains the phrase
+    // "this data is currently not publicly accessible" — a classic false
+    // positive for SOURCE UNAVAILABLE) from the actual archived content.
+    function stripWaybackPreamble(text) {
+        const m = text.match(/The Wayback Machine - https:\/\/web\.archive\.org\/[^\s]+/);
+        if (!m) return text;
+        // Only strip if we'd remove a real-looking chunk (>200 chars) AND
+        // keep a real-looking remainder (>500 chars). Otherwise the marker
+        // is either absent-in-practice or too close to the end to be
+        // worthwhile.
+        const cutAt = m.index + m[0].length;
+        if (cutAt < 200) return text;
+        const remainder = text.slice(cutAt).trim();
+        if (remainder.length < 500) return text;
+        return remainder;
+    },
+];
+
+function stripKnownChrome(text) {
+    let out = text;
+    for (const strip of CHROME_STRIPPERS) {
+        out = strip(out);
+    }
+    return out;
+}
+
+// Normalize comma-separated numerals ("23,068" → "23068") so that tokenizer
+// and paragraph-matching agree. Without this, "23,068" splits into ["23",
+// "068"] which both score near zero under IDF (common short numbers), and
+// the paragraph regex /\b23068\b/ wouldn't match "23,068" anyway.
+function normalizeNumerics(s) {
+    if (!s) return s;
+    // Apply twice so numbers with multiple commas (1,234,567) collapse fully.
+    return s.replace(/(\d),(\d)/g, '$1$2').replace(/(\d),(\d)/g, '$1$2');
 }
 
 // Tokenize a free-text claim into useful query terms.
@@ -59,6 +121,9 @@ const STOPWORDS = new Set([
 
 function tokenizeClaim(claim) {
     if (!claim) return [];
+    // Normalize comma-separated numerals so claim tokens match the source
+    // text after its own normalization pass.
+    claim = normalizeNumerics(claim);
     const terms = [];
     const seen = new Set();
 
@@ -219,24 +284,50 @@ function extractQueryMatches(text, terms, opts) {
  */
 function extractRelevantContent(text, query, options) {
     const opts = Object.assign({}, DEFAULTS, options || {});
-    const fullLength = text ? text.length : 0;
+    const rawLength = text ? text.length : 0;
 
     if (!text) {
         return { text: '', truncated: false, matches: 0, fullLength: 0, strategy: 'short' };
     }
+
+    // Pre-processing: strip recognized wrapper chrome (Wayback Machine
+    // capture preamble, etc.), collapse the multi-blank-line stacks that
+    // paragraph-preserving HTML extraction produces, and normalize comma-
+    // separated numerals so that "23,068" and "23068" are treated as the
+    // same token.
+    text = stripKnownChrome(text);
+    text = collapseBlankLines(text);
+    text = normalizeNumerics(text);
+    const fullLength = text.length;
 
     // No reduction needed: the whole source fits in the LLM budget. Narrowing
     // to excerpts here would drop context from paragraphs that don't lexically
     // match the claim but still inform it, at zero token-cost benefit. Only
     // reduce when we actually have to.
     if (fullLength <= opts.maxTotalChars) {
-        return { text, truncated: false, matches: 0, fullLength, strategy: 'short' };
+        return { text, truncated: rawLength !== fullLength, matches: 0, fullLength: rawLength, strategy: 'short' };
+    }
+
+    // Modestly-over-budget: use the plain first-N slice rather than query-
+    // aware narrowing. On pages up to ~1.5× budget, lead+head+tail carves
+    // 12k of paragraph-preserving text into three segments that together
+    // often have lower information density than the baseline first-N
+    // slice, with no compensating gain in coverage (the full page is only
+    // slightly bigger than the slice). Match the pre-patch behavior here.
+    if (fullLength <= opts.maxTotalChars * opts.shortTolerance) {
+        return {
+            text: text.slice(0, opts.maxTotalChars),
+            truncated: true,
+            matches: 0,
+            fullLength: rawLength,
+            strategy: 'fallback',
+        };
     }
 
     // No query: fall back to head-of-page snapshot.
     if (!query || !query.trim()) {
         if (fullLength <= opts.fallbackChars) {
-            return { text, truncated: false, matches: 0, fullLength, strategy: 'fallback' };
+            return { text, truncated: false, matches: 0, fullLength: rawLength, strategy: 'fallback' };
         }
         // Truncation state is surfaced on the response object
         // (truncated, fullLength); we deliberately do NOT embed a marker
@@ -247,7 +338,7 @@ function extractRelevantContent(text, query, options) {
             text: text.slice(0, opts.fallbackChars),
             truncated: true,
             matches: 0,
-            fullLength,
+            fullLength: rawLength,
             strategy: 'fallback',
         };
     }
@@ -284,6 +375,24 @@ function extractRelevantContent(text, query, options) {
         for (const { excerpt } of matches) {
             parts.push(excerpt);
         }
+        // Backfill: if lead + matched excerpts consume less than
+        // opts.minFillRatio of the budget, pad with head-of-remainder so
+        // we deliver a dense excerpt instead of a sparse one. Sparse
+        // excerpts (eg 1,400 chars in a 12k budget) look like
+        // source-unavailability signals to some LLMs. The backfill may
+        // re-include some of the matched paragraphs verbatim; that's fine,
+        // the LLM can tolerate a bit of redundancy better than it can
+        // tolerate apparent missing content.
+        const usedSoFar = parts.reduce((n, p) => n + p.length, 0);
+        const targetMin = Math.floor(opts.maxTotalChars * opts.minFillRatio);
+        if (usedSoFar < targetMin && restOfPage.length > 0) {
+            const roomLeft = opts.maxTotalChars - usedSoFar;
+            if (roomLeft > 0) {
+                const backfill = restOfPage.slice(0, roomLeft);
+                parts.push(backfill);
+                strategy = 'lead+matches+backfill';
+            }
+        }
     } else if (leadTruncated) {
         // Zero-match fallback: split the remaining budget between the head
         // and tail of the rest of the page. Abstracts and thesis statements
@@ -313,6 +422,9 @@ function extractRelevantContent(text, query, options) {
     }
 
     let result = parts.join('\n\n');
+    // Collapse multi-blank-line stacks before the length cap so the cap
+    // doesn't slice through whitespace padding that'd be dropped anyway.
+    result = collapseBlankLines(result);
     let truncated = result.length < fullLength;
     if (result.length > opts.maxTotalChars) {
         result = result.slice(0, opts.maxTotalChars);
@@ -323,7 +435,7 @@ function extractRelevantContent(text, query, options) {
         text: result,
         truncated,
         matches: matches.length,
-        fullLength,
+        fullLength: rawLength,
         strategy,
     };
 }

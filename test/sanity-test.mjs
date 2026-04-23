@@ -64,10 +64,19 @@ function check(name, cond, info) {
     const out = extractRelevantContent(page, claim);
     check('issue #88: includes lead', out.text.includes('INTRO.'));
     check('issue #88: surfaces conclusion', out.text.includes('Belgium increased by 12%'));
-    check('issue #88: drops the filler bulk', !out.text.includes('FILLER paragraph. '.repeat(20)));
     check('issue #88: at least one match', out.matches >= 1);
-    check('issue #88: strategy=lead+matches', out.strategy === 'lead+matches');
+    // Post-density-fix, when lead+matches don't fill budget we backfill
+    // with head-of-remainder, so strategy becomes lead+matches+backfill
+    // and a portion of the filler is re-included (that's the point —
+    // density is worth more than purity when the alternative is a tiny
+    // 1.4k-char excerpt).
+    check('issue #88: strategy=lead+matches(+backfill)',
+        out.strategy === 'lead+matches' || out.strategy === 'lead+matches+backfill',
+        `strategy=${out.strategy}`);
     check('issue #88: respects max total chars', out.text.length <= 9500); // 9000 + buffer for headers
+    check('issue #88: fills a reasonable fraction of the budget',
+        out.text.length >= 9000 * 0.6,
+        `length=${out.text.length}`);
 }
 
 // --- 6. Query with no hits: lead + head + tail fallback (zero-match case).
@@ -103,7 +112,7 @@ function check(name, cond, info) {
         'Final notes about other bridges.';
     // maxTotalChars lowered below the page size to exercise the narrowing
     // path; production uses a 12k budget that would let this fit whole.
-    const out = extractRelevantContent(page, '"Morrison Bridge"', { maxTotalChars: 3000 });
+    const out = extractRelevantContent(page, '"Morrison Bridge"', { maxTotalChars: 3000, shortTolerance: 1.0 });
     check('phrase match: surfaces target paragraph', out.text.includes('Morrison Bridge committee'));
     check('phrase match: at least one match', out.matches >= 1);
 }
@@ -145,8 +154,11 @@ function check(name, cond, info) {
     const page = lead + '\n\n' + commonParas + '\n\n' + rareHit;
 
     // maxTotalChars forces narrowing; without it the ~3.6k fixture fits whole.
-    const out = extractRelevantContent(page, 'bridge completed 2002', { maxMatches: 3, maxTotalChars: 3000 });
-    check('IDF: strategy=lead+matches', out.strategy === 'lead+matches', `strategy=${out.strategy}`);
+    // shortTolerance=1.0 makes the small fixture trip the query path (default
+    // 1.5 would redirect to plain fallback slice for modestly-over-budget
+    // pages; here we want to exercise IDF scoring specifically).
+    const out = extractRelevantContent(page, 'bridge completed 2002', { maxMatches: 3, maxTotalChars: 3000, shortTolerance: 1.0 });
+    check('IDF: strategy=lead+matches', out.strategy === 'lead+matches' || out.strategy === 'lead+matches+backfill', `strategy=${out.strategy}`);
     check('IDF: rare-token paragraph in output', out.text.includes('completed in 2002 after delays'));
     const rareIdx = out.text.indexOf('completed in 2002');
     const commonIdx = out.text.indexOf('Paragraph 0 about the bridge');
@@ -182,8 +194,8 @@ function check(name, cond, info) {
     const pDense = 'According to the 2020 census, Belgium reported population growth of 12 percent.';
     const page = [lead, p1, p2, p3, pDense].join('\n\n');
 
-    const out = extractRelevantContent(page, 'Belgium population 2020', { maxMatches: 1, maxTotalChars: 3000 });
-    check('multi-hit: strategy=lead+matches', out.strategy === 'lead+matches', `strategy=${out.strategy}`);
+    const out = extractRelevantContent(page, 'Belgium population 2020', { maxMatches: 1, maxTotalChars: 3000, shortTolerance: 1.0 });
+    check('multi-hit: strategy=lead+matches', out.strategy === 'lead+matches' || out.strategy === 'lead+matches+backfill', `strategy=${out.strategy}`);
     check('multi-hit scoring: dense paragraph ranks first',
         out.text.includes('Belgium reported population growth'),
         `matches=${out.matches}, tail=${out.text.slice(-400)}`);
@@ -198,9 +210,11 @@ function check(name, cond, info) {
     const page = lead + '\n\n' + tail;
 
     // Query that matches nothing in the rest of the page
-    // maxTotalChars lowered below the ~8.5k page so the fallback path runs.
+    // maxTotalChars lowered below the ~8.5k page so the fallback path runs;
+    // shortTolerance=1.0 keeps us out of the "short enough to slice" path so
+    // we specifically exercise lead+head+tail.
     const out = extractRelevantContent(page, 'xyzzynobody matches this claim', {
-        leadChars: 2500, maxTotalChars: 3000,
+        leadChars: 2500, maxTotalChars: 3000, shortTolerance: 1.0,
     });
     check('fallback: strategy=lead+head+tail', out.strategy === 'lead+head+tail' || out.strategy === 'lead-only',
         `strategy=${out.strategy}`);
@@ -211,6 +225,76 @@ function check(name, cond, info) {
     const tailLabelCount = (out.text.match(/### Tail of remainder/g) || []).length;
     check('fallback: at most one head-of-remainder section', headLabelCount <= 1);
     check('fallback: head-tail overlap handled', tailLabelCount <= 1);
+}
+
+// --- 15. Wayback Machine preamble is stripped before scoring so the
+// "this data is currently not publicly accessible" phrase doesn't poison
+// the lead.
+{
+    const preamble =
+        'AmericanHeritage.com / A Look at the Record\n\n' +
+        '57 captures 07 May 2006 - 14 Jan 2026\n\n' +
+        'Collection: alexa_web_2009 this data is currently not publicly accessible.\n\n' +
+        'TIMESTAMPS\n\n' +
+        'The Wayback Machine - https://web.archive.org/web/20090211093437/http://example.com/article\n\n' +
+        'Login | Register\n\n';
+    const article = 'In 1933 just 23,068 arrived, the lowest number since 1831 and the record for this century. ' + 'X'.repeat(12000);
+    const out = extractRelevantContent(preamble + article, '1933 23,068 arrived', { maxTotalChars: 9000 });
+    check('wayback: preamble stripped', !out.text.includes('this data is currently not publicly accessible'));
+    check('wayback: article text preserved', out.text.includes('In 1933 just 23068 arrived') || out.text.includes('In 1933 just 23,068 arrived'));
+}
+
+// --- 16. Comma-separated numeric token matches the source (normalized on
+// both sides). Claim says "23,068"; source says "23,068"; after
+// normalization both become "23068" and the claim term matches the para.
+{
+    const lead = 'X'.repeat(3000);
+    const target = 'In 1933 just 23,068 arrived, the lowest number since 1831 and the record for this century.';
+    const filler = Array.from({length: 20}, (_, i) => `Unrelated paragraph ${i} about something else.`).join('\n\n');
+    const page = lead + '\n\n' + filler + '\n\n' + target;
+    const out = extractRelevantContent(page, 'in 1933 only 23,068 moved', { maxTotalChars: 5000, shortTolerance: 1.0 });
+    check('numeric normalization: comma-separated number matches',
+        out.text.includes('23068 arrived') || out.text.includes('23,068 arrived'),
+        `strategy=${out.strategy}, matches=${out.matches}, tail=${out.text.slice(-300)}`);
+}
+
+// --- 17. Short-tolerance: a page at 1.2× the budget uses the plain
+// first-N slice (strategy=fallback), NOT lead+head+tail. This avoids
+// the density-collapse failure mode on modestly-over-budget pages.
+{
+    const budget = 10000;
+    const page = 'Article content. '.repeat(budget / 17) + 'More content.'; // ~budget * 1.2
+    const out = extractRelevantContent(page, 'content article', { maxTotalChars: budget });
+    check('short-tolerance: modestly-over-budget uses fallback', out.strategy === 'fallback', `strategy=${out.strategy}`);
+    check('short-tolerance: respects cap', out.text.length <= budget);
+}
+
+// --- 18. Backfill: lead+matches that'd be too short now fills the budget.
+{
+    const lead = 'LEAD. '.repeat(400); // ~2400 chars
+    // A single matched paragraph is ~60 chars. Without backfill: total
+    // would be ~2,460. With backfill: ~9,000.
+    const singleMatch = 'The bridge opened in 2002 after years of delay.';
+    const filler = 'Filler paragraph about unrelated topics. '.repeat(400); // ~16,000 chars
+    const page = lead + '\n\n' + filler + '\n\n' + singleMatch;
+    const out = extractRelevantContent(page, '"bridge opened in 2002"', { maxTotalChars: 9000 });
+    check('backfill: strategy reflects padding',
+        out.strategy === 'lead+matches+backfill' || out.strategy === 'lead+matches',
+        `strategy=${out.strategy}`);
+    check('backfill: output near budget', out.text.length >= 9000 * 0.6, `length=${out.text.length}`);
+    check('backfill: match preserved', out.text.includes('bridge opened in 2002'));
+}
+
+// --- 19. Blank-line collapse: multi-blank-line stacks are squeezed down to
+// single blank-line separators before returning.
+{
+    const bloated = 'First paragraph.' + '\n\n \n \n \n \n'.repeat(3) + 'Second paragraph.';
+    // Long enough to trip narrowing with tight budget.
+    const page = 'X'.repeat(5000) + '\n\n' + bloated + '\n\n' + 'Y'.repeat(8000);
+    const out = extractRelevantContent(page, 'paragraph', { maxTotalChars: 9000 });
+    // Should not contain any run of ≥3 consecutive newlines (allowing only
+    // the standard \n\n paragraph separator).
+    check('blank-line collapse: no 3+ newline stacks', !/\n{3,}/.test(out.text), `saw: ${JSON.stringify(out.text.match(/\n{3,}/)?.[0] || 'none')}`);
 }
 
 console.log('');
