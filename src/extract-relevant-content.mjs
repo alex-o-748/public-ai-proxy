@@ -238,10 +238,13 @@ function extractRelevantContent(text, query, options) {
         if (fullLength <= opts.fallbackChars) {
             return { text, truncated: false, matches: 0, fullLength, strategy: 'fallback' };
         }
+        // Truncation state is surfaced on the response object
+        // (truncated, fullLength); we deliberately do NOT embed a marker
+        // in the returned text. LLM consumers treat textual "truncation"
+        // notes as source-unavailability signals and refuse to judge,
+        // even when the visible content is adequate.
         return {
-            text: text.slice(0, opts.fallbackChars) +
-                  `\n\n[Truncated — full page was ${fullLength} chars; ` +
-                  'pass a query to get targeted excerpts]',
+            text: text.slice(0, opts.fallbackChars),
             truncated: true,
             matches: 0,
             fullLength,
@@ -266,21 +269,20 @@ function extractRelevantContent(text, query, options) {
 
     const matches = extractQueryMatches(restOfPage, terms, opts);
 
+    // Emit only raw text, no structural headers or notes. Anything that
+    // looks like editorial metadata in the LLM-visible content ("## Page
+    // lead", "did not match any paragraph…", "[Truncated — …]") gets
+    // interpreted as a reliability signal and triggers false Source-
+    // Unavailable verdicts. Truncation/strategy info is carried on the
+    // response object instead.
     const parts = [];
-    parts.push('## Page lead\n' + lead);
+    parts.push(lead);
 
     let strategy;
     if (matches.length) {
         strategy = 'lead+matches';
-        parts.push(`\n## Excerpts matching claim\n`);
-        for (const { term, excerpt } of matches) {
-            parts.push(`### [match: "${term}"]\n${excerpt}\n`);
-        }
-        if (matches.length >= opts.maxMatches) {
-            parts.push(
-                `\n[Additional matches may exist in the full ${fullLength}-char ` +
-                'page; the model has the most relevant excerpts above.]'
-            );
+        for (const { excerpt } of matches) {
+            parts.push(excerpt);
         }
     } else if (leadTruncated) {
         // Zero-match fallback: split the remaining budget between the head
@@ -289,12 +291,7 @@ function extractRelevantContent(text, query, options) {
         // the end; the middle is where topic drift lives. Strictly better
         // than lead-only when token-matching fails on paraphrase or
         // synonym-heavy claims.
-        // Budget for section headers + the explanatory note. Upper-bounded
-        // by a worst-case measurement: the note includes up to 6 query
-        // terms plus the full-length string, and section headers run ~150
-        // chars total. 600 gives comfortable margin without wasting budget.
-        const headerReserve = 600;
-        const remaining = Math.max(0, opts.maxTotalChars - lead.length - headerReserve);
+        const remaining = Math.max(0, opts.maxTotalChars - lead.length);
         if (remaining >= 1000 && restOfPage.length > 0) {
             strategy = 'lead+head+tail';
             const halfBudget = Math.floor(remaining / 2);
@@ -302,38 +299,23 @@ function extractRelevantContent(text, query, options) {
             const tailStart = Math.max(headEnd, restOfPage.length - halfBudget);
             const head = restOfPage.slice(0, headEnd);
             const tail = restOfPage.slice(tailStart);
-            const shownTerms = terms.slice(0, 6).map(t => `"${t}"`).join(', ');
 
-            parts.push(
-                `\n## Remainder of page — fallback view\n` +
-                `[Note: full page was ${fullLength} chars. The claim's specific ` +
-                `terms (${shownTerms}) did not match any paragraph past the lead, ` +
-                `so we fell back to showing the head and tail of the remainder.]\n`
-            );
-            parts.push(`### Head of remainder (${head.length} chars)\n${head}`);
+            parts.push(head);
             // Only include tail if it's not already contained in head.
             if (tailStart > headEnd) {
-                parts.push(
-                    `\n### Tail of remainder (${tail.length} chars, ` +
-                    `from char ${opts.leadChars + tailStart} onward)\n${tail}`
-                );
+                parts.push(tail);
             }
         } else {
             strategy = 'lead-only';
-            parts.push(
-                `\n[Note: full page was ${fullLength} chars. No matches found ` +
-                `for claim terms (${terms.slice(0, 6).join(', ')}). The fact you are ` +
-                'looking for may not appear in this source.]'
-            );
         }
     } else {
         strategy = 'lead-only';
     }
 
-    let result = parts.join('\n');
+    let result = parts.join('\n\n');
     let truncated = result.length < fullLength;
     if (result.length > opts.maxTotalChars) {
-        result = result.slice(0, opts.maxTotalChars) + '\n\n[Truncated — hit total output cap]';
+        result = result.slice(0, opts.maxTotalChars);
         truncated = true;
     }
 
