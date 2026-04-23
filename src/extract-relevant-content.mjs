@@ -349,10 +349,14 @@ function extractRelevantContent(text, query, options) {
     const restOfPage = text.slice(opts.leadChars);
 
     // Accept either a free-text claim (we tokenize) or a comma-separated
-    // term list (we use as-is). Heuristic: a comma-bearing string with no
-    // spaces around commas looks intentional.
+    // term list (we use as-is). Heuristic: a comma-bearing string is only
+    // treated as a term list when NO whitespace is adjacent to any comma.
+    // Natural-language claims often contain commas followed by spaces
+    // (clause separators like "1933, only") or commas inside numerals
+    // ("23,068") — neither of those is a term list, and treating them as
+    // one produces literal multi-word phrase regexes that match nothing.
     let terms;
-    if (query.includes(',') && !/\s,/.test(query)) {
+    if (query.includes(',') && !/\s,|,\s/.test(query)) {
         terms = query.split(',').map(t => t.trim()).filter(Boolean);
     } else {
         terms = tokenizeClaim(query);

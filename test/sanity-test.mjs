@@ -124,6 +124,21 @@ function check(name, cond, info) {
     check('comma-list query: surfaces target', out.text.includes('Douglas Adams was born'));
 }
 
+// --- 8b. Natural-language claim containing commas (as clause-separator and
+// inside numerals) is treated as free text, NOT as a comma-separated term
+// list. Pre-fix this case falsely split on every comma producing literal
+// multi-word phrase regexes that matched nothing.
+{
+    const lead = 'X'.repeat(3000);
+    const target = 'In 1933 just 23068 arrived, the lowest number since 1831.';
+    const page = lead + '\n\n' + 'Unrelated.\n\n'.repeat(30) + '\n\n' + target;
+    const claim = 'but in 1933, only 23,068 moved to the U.S.';
+    const out = extractRelevantContent(page, claim, { maxTotalChars: 9000, shortTolerance: 1.0 });
+    check('natural-language comma claim: not mistaken for term list',
+        out.text.includes('23068 arrived') || out.text.includes('23,068 arrived'),
+        `strategy=${out.strategy}, matches=${out.matches}`);
+}
+
 // --- 9. Full-length unaltered when source fits under the total cap.
 {
     const page = 'A'.repeat(800) + '\n\nDouglas Adams\n\n' + 'B'.repeat(800);
