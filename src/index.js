@@ -285,6 +285,8 @@ export default {
         body.max_tokens = HF_MAX_TOKENS;
       }
 
+      body.bill_to = "wikimedia";
+
       let upstream;
       try {
         const controller = new AbortController();
