@@ -7,6 +7,19 @@ const WINDOW_MS = 60_000;    // per minute
 // Best-effort per-IP buckets (free, in-memory)
 const ipBuckets = new Map();
 
+// ===== HuggingFace proxy settings =====
+const HF_ALLOWED_MODELS = new Set([
+  "openai/gpt-oss-20b",
+]);
+const HF_MAX_TOKENS = 4096;
+const HF_MAX_BODY_BYTES = 200 * 1024;
+const HF_UPSTREAM_TIMEOUT_MS = 60_000;
+
+function jsonError(status, message, cors, extraHeaders) {
+  const headers = { ...cors, "Content-Type": "application/json", ...(extraHeaders || {}) };
+  return new Response(JSON.stringify({ error: { message } }), { status, headers });
+}
+
 // ===== Neon SQL-over-HTTP helper =====
 // Parses a postgres:// connection string and calls Neon's HTTP endpoint.
 // No npm packages needed — just fetch().
@@ -248,6 +261,73 @@ export default {
       });
     }
     // =========================
+
+    // ===== /hf endpoint — proxy to HuggingFace Inference Providers =====
+    if (url.pathname === '/hf') {
+      const raw = await request.text();
+      if (raw.length > HF_MAX_BODY_BYTES) {
+        return jsonError(413, "Request body too large", cors);
+      }
+      let body;
+      try {
+        body = JSON.parse(raw);
+      } catch {
+        return jsonError(400, "Invalid JSON", cors);
+      }
+
+      const modelId = typeof body.model === 'string' ? body.model : '';
+      const baseModel = modelId.split(':')[0];
+      if (!HF_ALLOWED_MODELS.has(baseModel)) {
+        return jsonError(400, `Model not allowed: ${modelId || '(missing)'}`, cors);
+      }
+
+      if (typeof body.max_tokens === 'number' && body.max_tokens > HF_MAX_TOKENS) {
+        body.max_tokens = HF_MAX_TOKENS;
+      }
+
+      let upstream;
+      try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), HF_UPSTREAM_TIMEOUT_MS);
+        try {
+          upstream = await fetch("https://router.huggingface.co/v1/chat/completions", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "Authorization": `Bearer ${env.HF_TOKEN}`,
+            },
+            body: JSON.stringify(body),
+            signal: controller.signal,
+          });
+        } finally {
+          clearTimeout(timer);
+        }
+      } catch (e) {
+        const status = e.name === 'AbortError' ? 504 : 502;
+        const msg = e.name === 'AbortError' ? "Upstream timeout" : "Upstream network error";
+        return jsonError(status, msg, cors);
+      }
+
+      if (upstream.status === 401 || upstream.status === 403) {
+        return jsonError(502, "Upstream auth failed", cors);
+      }
+      if (upstream.status === 429) {
+        const ra = upstream.headers.get("retry-after");
+        const text = await upstream.text();
+        const headers = new Headers(cors);
+        headers.set("Content-Type", upstream.headers.get("content-type") || "application/json");
+        if (ra) headers.set("retry-after", ra);
+        return new Response(text, { status: 429, headers });
+      }
+      if (upstream.status >= 500) {
+        return jsonError(502, "Upstream error", cors);
+      }
+
+      const headers = new Headers(cors);
+      const ct = upstream.headers.get("content-type");
+      if (ct) headers.set("content-type", ct);
+      return new Response(upstream.body, { status: upstream.status, headers });
+    }
 
     // Forward to PublicAI
     const upstream = await fetch(
