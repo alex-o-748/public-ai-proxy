@@ -285,8 +285,6 @@ export default {
         body.max_tokens = HF_MAX_TOKENS;
       }
 
-      body.bill_to = "wikimedia";
-
       let upstream;
       try {
         const controller = new AbortController();
@@ -297,6 +295,7 @@ export default {
             headers: {
               "Content-Type": "application/json",
               "Authorization": `Bearer ${env.HF_TOKEN}`,
+              "X-HF-Bill-To": "wikimedia",
             },
             body: JSON.stringify(body),
             signal: controller.signal,
