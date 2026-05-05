@@ -5,6 +5,7 @@ A Cloudflare Worker that proxies requests to the [PublicAI](https://publicai.co)
 ## Features
 
 - **API Proxying** — Forwards chat completion requests to PublicAI's `/v1/chat/completions` endpoint
+- **HuggingFace Proxy** — `/hf` route proxies to HuggingFace Inference Providers (`router.huggingface.co`) with a model allowlist
 - **Rate Limiting** — Per-IP rate limiting (20 requests/minute) using in-memory buckets
 - **CORS** — Configured for Wikipedia origins (`en.wikipedia.org`, `www.wikipedia.org`, `commons.wikimedia.org`)
 - **Verification Logging** — `/log` endpoint records citation verification results to a Neon PostgreSQL database
@@ -16,6 +17,7 @@ A Cloudflare Worker that proxies requests to the [PublicAI](https://publicai.co)
 | Method | Path / Param | Description |
 |--------|-------------|-------------|
 | `POST` | `/` | Proxies request body to PublicAI chat completions |
+| `POST` | `/hf` | Proxies chat completions to HuggingFace Inference Providers (allowlisted models only) |
 | `POST` | `/log` | Logs a citation verification result to the database |
 | `GET` | `/?fetch=<url>` | Fetches and extracts text content from a URL |
 | `GET` | `/?ping` | Returns timestamp, IP, and CORS status |
@@ -36,6 +38,7 @@ Configure these via `wrangler secret put`:
 
 ```sh
 wrangler secret put publicai        # PublicAI API bearer token
+wrangler secret put HF_TOKEN        # HuggingFace Inference Providers token (for /hf)
 wrangler secret put DATABASE_URL    # Neon PostgreSQL connection string
 ```
 
@@ -61,6 +64,18 @@ CREATE TABLE verification_logs (
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 ```
+
+### HuggingFace Proxy (`/hf`)
+
+The `/hf` endpoint forwards OpenAI-compatible chat completion requests to `https://router.huggingface.co/v1/chat/completions` using the `HF_TOKEN` secret.
+
+- **Allowlisted models** — only models in `HF_ALLOWED_MODELS` are accepted (currently `openai/gpt-oss-20b`); requests with other models return `400`. Provider suffixes after `:` are stripped before checking.
+- **Body limit** — requests larger than 200 KB return `413`.
+- **Token cap** — `max_tokens` is clamped to `4096`.
+- **Upstream timeout** — 60 s; aborted requests return `504`.
+- **Error mapping** — upstream `401`/`403` become `502`; upstream `5xx` become `502`; `429` is passed through with `retry-after`.
+
+Update the allowlist in `src/index.js` (`HF_ALLOWED_MODELS`) to enable additional models.
 
 ## Development
 
