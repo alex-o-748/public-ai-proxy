@@ -295,6 +295,7 @@ export default {
             headers: {
               "Content-Type": "application/json",
               "Authorization": `Bearer ${env.HF_TOKEN}`,
+              "X-HF-Bill-To": "wikimedia",
             },
             body: JSON.stringify(body),
             signal: controller.signal,
