@@ -10,6 +10,8 @@ const ipBuckets = new Map();
 // ===== HuggingFace proxy settings =====
 const HF_ALLOWED_MODELS = new Set([
   "openai/gpt-oss-20b",
+  "Qwen/Qwen3-32B",
+  "deepseek-ai/DeepSeek-V3.2-Exp",
 ]);
 const HF_MAX_TOKENS = 4096;
 const HF_MAX_BODY_BYTES = 200 * 1024;
