@@ -69,7 +69,7 @@ CREATE TABLE verification_logs (
 
 The `/hf` endpoint forwards OpenAI-compatible chat completion requests to `https://router.huggingface.co/v1/chat/completions` using the `HF_TOKEN` secret.
 
-- **Allowlisted models** — only models in `HF_ALLOWED_MODELS` are accepted (currently `openai/gpt-oss-20b`, `Qwen/Qwen3-32B`, `deepseek-ai/DeepSeek-V3.2-Exp`); requests with other models return `400`. Provider suffixes after `:` are stripped before checking.
+- **Allowlisted models** — only models in `HF_ALLOWED_MODELS` are accepted (currently `openai/gpt-oss-20b`, `Qwen/Qwen3-32B`, `deepseek-ai/DeepSeek-V3`); requests with other models return `400`. Provider suffixes after `:` are stripped before checking.
 - **Body limit** — requests larger than 200 KB return `413`.
 - **Token cap** — `max_tokens` is clamped to `4096`.
 - **Upstream timeout** — 60 s; aborted requests return `504`.
