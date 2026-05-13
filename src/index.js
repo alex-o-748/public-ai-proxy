@@ -22,6 +22,18 @@ function jsonError(status, message, cors, extraHeaders) {
   return new Response(JSON.stringify({ error: { message } }), { status, headers });
 }
 
+// Rewrite Wayback Machine playback URLs to use the `id_` flag, which bypasses
+// Wayback's chrome (toolbar, banner, footer) and returns the raw archived
+// content. Without this, downstream extraction (PDF, Defuddle, strip) often
+// captures the Wayback wrapper instead of the inner article. Leaves URLs that
+// already have a flag (`id_`, `js_`, `cs_`, `im_`, etc.) untouched.
+export function rewriteWaybackUrl(targetUrl) {
+  return targetUrl.replace(
+    /^(https?:\/\/web\.archive\.org\/web\/\d{14})\//,
+    '$1id_/'
+  );
+}
+
 // ===== Neon SQL-over-HTTP helper =====
 // Parses a postgres:// connection string and calls Neon's HTTP endpoint.
 // No npm packages needed — just fetch().
@@ -144,16 +156,18 @@ export default {
 
     // NEW: Handle URL fetch requests
     if (request.method === 'GET' && url.searchParams.has('fetch')) {
-      const targetUrl = url.searchParams.get('fetch');
+      const rawTargetUrl = url.searchParams.get('fetch');
       const pageParam = url.searchParams.get('page'); // optional: specific page number (1-indexed)
 
       // Basic validation
-      if (!targetUrl || !targetUrl.startsWith('http')) {
+      if (!rawTargetUrl || !rawTargetUrl.startsWith('http')) {
           return new Response(JSON.stringify({ error: 'Invalid URL' }), {
               status: 400,
               headers: { ...corsHeaders, 'Content-Type': 'application/json' }
           });
       }
+
+      const targetUrl = rewriteWaybackUrl(rawTargetUrl);
 
       try {
           const controller = new AbortController();
