@@ -50,11 +50,7 @@ export default {
   async fetch(request, env, ctx) {
     const origin = request.headers.get("Origin") || "";
 
-    const allowedOrigins = [
-      "https://en.wikipedia.org",
-      "https://www.wikipedia.org",
-      "https://commons.wikimedia.org"
-    ];
+    const isAllowedOrigin = /^https:\/\/[a-z0-9-]+\.(wikipedia|wikimedia)\.org$/.test(origin);
 
     const cors = {
       "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
@@ -63,7 +59,7 @@ export default {
       "Vary": "Origin"
     };
 
-    if (allowedOrigins.includes(origin)) {
+    if (isAllowedOrigin) {
       cors["Access-Control-Allow-Origin"] = origin;
     }
 
