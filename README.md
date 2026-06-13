@@ -60,9 +60,20 @@ CREATE TABLE verification_logs (
   source_url TEXT,
   provider TEXT,
   verdict TEXT,
+  reason_type TEXT,
   confidence REAL,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
+```
+
+`reason_type` is an optional category explaining *why* a verdict was reached
+(e.g. a `refutes` verdict due to an `omission` or a `contradiction`). It may
+be `NULL` when not applicable.
+
+If you already have a `verification_logs` table, add the column with:
+
+```sql
+ALTER TABLE verification_logs ADD COLUMN reason_type TEXT;
 ```
 
 ### HuggingFace Proxy (`/hf`)

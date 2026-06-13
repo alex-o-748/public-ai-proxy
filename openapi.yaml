@@ -391,6 +391,17 @@ components:
           description: Verification outcome.
           enum: [supports, refutes, not_enough_info, error]
           example: "supports"
+        reason_type:
+          type: string
+          nullable: true
+          description: >
+            Optional category explaining *why* a verdict was reached — most
+            useful for non-supporting verdicts. For example, a "refutes" /
+            "Not Supported" verdict may be due to an `omission` (the source
+            does not mention the claim) or a `contradiction` (the source
+            states the opposite). Omit or set to null when not applicable.
+          enum: [omission, contradiction, unrelated, outdated, other]
+          example: "omission"
         confidence:
           type: number
           format: float
