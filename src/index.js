@@ -1,4 +1,5 @@
 import { extractText as extractPdfText, getDocumentProxy } from "unpdf";
+import { defuddleExtract } from "./extractor-defuddle.mjs";
 
 // ===== Rate limit settings =====
 const RATE_LIMIT = 20;        // requests
@@ -216,7 +217,7 @@ export default {
           }
 
           const html = await response.text();
-          const content = extractText(html);
+          const content = await defuddleExtract(html, targetUrl);
 
           return new Response(JSON.stringify({ content }), {
               headers: { ...corsHeaders, 'Content-Type': 'application/json' }
@@ -352,20 +353,3 @@ export default {
     });
   }
 };
-
-function extractText(html) {
-  return html
-    .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
-    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
-    .replace(/<nav[^>]*>[\s\S]*?<\/nav>/gi, '')
-    .replace(/<header[^>]*>[\s\S]*?<\/header>/gi, '')
-    .replace(/<footer[^>]*>[\s\S]*?<\/footer>/gi, '')
-    .replace(/<[^>]+>/g, ' ')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .substring(0, 12000);
-}
