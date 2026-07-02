@@ -131,10 +131,10 @@ export default {
         queryNeon(
           env.DATABASE_URL,
           `INSERT INTO verification_logs
-            (article_url, article_title, citation_number, source_url, provider, verdict, confidence)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+            (article_url, article_title, citation_number, source_url, provider, verdict, reason_type, confidence)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
           [body.article_url, body.article_title, body.citation_number,
-           body.source_url, body.provider, body.verdict, body.confidence]
+           body.source_url, body.provider, body.verdict, body.reason_type, body.confidence]
         ).catch(err => console.error('Log write failed:', err.message))
       );
       return new Response('ok', {

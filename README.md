@@ -60,9 +60,20 @@ CREATE TABLE verification_logs (
   source_url TEXT,
   provider TEXT,
   verdict TEXT,
+  reason_type TEXT,
   confidence REAL,
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
+```
+
+`confidence` must be a floating-point type (`REAL`) because the proxy logs
+fractional scores such as `0.5`. If an existing table was created with
+`confidence` as an `integer`, inserts fail with
+`invalid input syntax for type integer: "0.5"`. Fix an existing table with:
+
+```sql
+ALTER TABLE verification_logs ALTER COLUMN confidence TYPE REAL USING confidence::real;
+ALTER TABLE verification_logs ADD COLUMN IF NOT EXISTS reason_type TEXT;
 ```
 
 ### HuggingFace Proxy (`/hf`)
