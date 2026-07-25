@@ -78,7 +78,10 @@ The `/hf` endpoint forwards OpenAI-compatible chat completion requests to `https
 
 - **Allowlisted models** — only models in `HF_ALLOWED_MODELS` are accepted (currently `openai/gpt-oss-20b`, `Qwen/Qwen3-32B`, `deepseek-ai/DeepSeek-V3.2-Exp`); requests with other models return `400`. Provider suffixes after `:` are stripped before checking.
 - **Body limit** — requests larger than 200 KB return `413`.
-- **Token cap** — `max_tokens` is clamped to `4096`.
+- **Token cap** — `max_tokens` and `max_completion_tokens` are clamped to `16384`. When a clamp is applied,
+  the response carries `X-Proxy-Max-Tokens-Clamped` describing it. The cap covers reasoning tokens as well as
+  visible output, so reasoning models need real headroom — too low a ceiling truncates the model mid-thought
+  and returns `finish_reason: "length"` with empty `content`.
 - **Upstream timeout** — 60 s; aborted requests return `504`.
 - **Error mapping** — upstream `401`/`403` become `502`; upstream `5xx` become `502`; `429` is passed through with `retry-after`.
 
@@ -90,7 +93,10 @@ The `/liftwing` endpoint forwards OpenAI-compatible chat completion requests to 
 
 - **Allowlisted models** — only models in `LIFTWING_ALLOWED_MODELS` are accepted (currently `llm-qwen3-14b`, `llm-qwen36-27b`); requests with other models return `400`.
 - **Body limit** — requests larger than 200 KB return `413`.
-- **Token cap** — `max_tokens` is clamped to `4096`.
+- **Token cap** — `max_tokens` and `max_completion_tokens` are clamped to `16384`. When a clamp is applied,
+  the response carries `X-Proxy-Max-Tokens-Clamped` describing it. The cap covers reasoning tokens as well as
+  visible output, so reasoning models need real headroom — too low a ceiling truncates the model mid-thought
+  and returns `finish_reason: "length"` with empty `content`.
 - **Upstream timeout** — 60 s; aborted requests return `504`.
 - **Error mapping** — upstream `401`/`403` become `502`; upstream `5xx` become `502`; `429` is passed through with `retry-after`.
 - **Auth** — anonymous by default; if the `LIFTWING_TOKEN` secret is set it is sent as a `Bearer` token to use the approved-bot rate-limit tier. An `Api-User-Agent` header identifies the proxy to Wikimedia.

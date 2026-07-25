@@ -194,6 +194,15 @@ components:
         max_tokens:
           type: integer
           minimum: 1
+          description: >-
+            Budget for reasoning plus visible output. On /hf and /liftwing this
+            is clamped to 16384; when clamped, the response carries an
+            X-Proxy-Max-Tokens-Clamped header.
+        max_completion_tokens:
+          type: integer
+          minimum: 1
+          description: >-
+            OpenAI's current name for max_tokens. Clamped identically.
         top_p:
           type: number
         frequency_penalty:

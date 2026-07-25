@@ -13,7 +13,12 @@ const HF_ALLOWED_MODELS = new Set([
   "Qwen/Qwen3-32B",
   "deepseek-ai/DeepSeek-V3.2-Exp",
 ]);
-const HF_MAX_TOKENS = 4096;
+// Reasoning models (gpt-oss, Qwen3, DeepSeek) spend this budget on their
+// chain-of-thought *before* emitting any content, so a low ceiling truncates
+// mid-thought and returns finish_reason="length" with an empty message. The
+// cap is an abuse guard, not a cost target — normal completions finish well
+// under it.
+const HF_MAX_TOKENS = 16384;
 const HF_MAX_BODY_BYTES = 200 * 1024;
 const HF_UPSTREAM_TIMEOUT_MS = 60_000;
 
@@ -26,7 +31,7 @@ const LIFTWING_ALLOWED_MODELS = new Set([
   "llm-qwen3-14b",
   "llm-qwen36-27b",
 ]);
-const LIFTWING_MAX_TOKENS = 4096;
+const LIFTWING_MAX_TOKENS = 16384;
 const LIFTWING_MAX_BODY_BYTES = 200 * 1024;
 const LIFTWING_UPSTREAM_TIMEOUT_MS = 60_000;
 const LIFTWING_BASE = "https://api.wikimedia.org/service/lw/inference/v1/models";
@@ -39,6 +44,27 @@ const LIFTWING_USER_AGENT =
 // JSON.parse of the message content. Strip those blocks from the final text.
 function stripThinkTags(text) {
   return text.replace(/<think>[\s\S]*?<\/think>/gi, "").replace(/^\s+/, "");
+}
+
+// Clamp the caller's output-token budget to `cap`, in place.
+//
+// Covers both the legacy `max_tokens` and OpenAI's current
+// `max_completion_tokens` — checking only the former let callers bypass the
+// cap entirely by using the newer field name.
+//
+// Returns a description of what was clamped (or null if nothing was), so the
+// caller can surface it on the response instead of silently shortening the
+// budget: a truncated reasoning model returns finish_reason="length" with
+// empty content, which is very hard to diagnose from the client side.
+function clampMaxTokens(body, cap) {
+  const clamped = [];
+  for (const field of ["max_tokens", "max_completion_tokens"]) {
+    if (typeof body[field] === "number" && body[field] > cap) {
+      clamped.push(`${field}=${body[field]}`);
+      body[field] = cap;
+    }
+  }
+  return clamped.length ? `${clamped.join(",")} clamped to ${cap}` : null;
 }
 
 function jsonError(status, message, cors, extraHeaders) {
@@ -80,6 +106,9 @@ export default {
       "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
       "Access-Control-Allow-Headers":
         request.headers.get("Access-Control-Request-Headers") || "Content-Type",
+      // Without this, a browser user script can't read either header off the
+      // response — cross-origin reads see only the CORS-safelisted set.
+      "Access-Control-Expose-Headers": "X-Proxy-Max-Tokens-Clamped, Retry-After",
       "Vary": "Origin"
     };
 
@@ -303,9 +332,7 @@ export default {
         return jsonError(400, `Model not allowed: ${modelId || '(missing)'}`, cors);
       }
 
-      if (typeof body.max_tokens === 'number' && body.max_tokens > HF_MAX_TOKENS) {
-        body.max_tokens = HF_MAX_TOKENS;
-      }
+      const hfClampNote = clampMaxTokens(body, HF_MAX_TOKENS);
 
       let upstream;
       try {
@@ -349,6 +376,7 @@ export default {
       const headers = new Headers(cors);
       const ct = upstream.headers.get("content-type");
       if (ct) headers.set("content-type", ct);
+      if (hfClampNote) headers.set("X-Proxy-Max-Tokens-Clamped", hfClampNote);
       return new Response(upstream.body, { status: upstream.status, headers });
     }
 
@@ -370,9 +398,7 @@ export default {
         return jsonError(400, `Model not allowed: ${modelId || '(missing)'}`, cors);
       }
 
-      if (typeof body.max_tokens === 'number' && body.max_tokens > LIFTWING_MAX_TOKENS) {
-        body.max_tokens = LIFTWING_MAX_TOKENS;
-      }
+      const lwClampNote = clampMaxTokens(body, LIFTWING_MAX_TOKENS);
 
       // Lift Wing routes by model name in the path as well as the body.
       const endpoint = `${LIFTWING_BASE}/${encodeURIComponent(modelId)}/openai/v1/chat/completions`;
@@ -429,6 +455,7 @@ export default {
       if (isStream) {
         const headers = new Headers(cors);
         if (upstreamCt) headers.set("content-type", upstreamCt);
+        if (lwClampNote) headers.set("X-Proxy-Max-Tokens-Clamped", lwClampNote);
         return new Response(upstream.body, { status: upstream.status, headers });
       }
 
@@ -442,6 +469,7 @@ export default {
         // Not JSON — return as received rather than corrupting it.
         const headers = new Headers(cors);
         if (upstreamCt) headers.set("content-type", upstreamCt);
+        if (lwClampNote) headers.set("X-Proxy-Max-Tokens-Clamped", lwClampNote);
         return new Response(upstreamText, { status: upstream.status, headers });
       }
 
@@ -455,6 +483,7 @@ export default {
 
       const headers = new Headers(cors);
       headers.set("content-type", "application/json");
+      if (lwClampNote) headers.set("X-Proxy-Max-Tokens-Clamped", lwClampNote);
       return new Response(JSON.stringify(payload), { status: upstream.status, headers });
     }
 
