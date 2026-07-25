@@ -13,7 +13,7 @@ const HF_ALLOWED_MODELS = new Set([
   "Qwen/Qwen3-32B",
   "deepseek-ai/DeepSeek-V3.2-Exp",
 ]);
-const HF_MAX_TOKENS = 4096;
+const HF_MAX_TOKENS = 16384;
 const HF_MAX_BODY_BYTES = 200 * 1024;
 const HF_UPSTREAM_TIMEOUT_MS = 60_000;
 
@@ -26,9 +26,9 @@ const LIFTWING_ALLOWED_MODELS = new Set([
   "llm-qwen3-14b",
   "llm-qwen36-27b",
 ]);
-const LIFTWING_MAX_TOKENS = 4096;
+const LIFTWING_MAX_TOKENS = 16384;
 const LIFTWING_MAX_BODY_BYTES = 200 * 1024;
-const LIFTWING_UPSTREAM_TIMEOUT_MS = 60_000;
+const LIFTWING_UPSTREAM_TIMEOUT_MS = 120_000;
 const LIFTWING_BASE = "https://api.wikimedia.org/service/lw/inference/v1/models";
 // Wikimedia asks API clients to identify themselves with a descriptive UA.
 const LIFTWING_USER_AGENT =
