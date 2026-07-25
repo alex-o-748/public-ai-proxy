@@ -105,6 +105,32 @@ The `/liftwing` endpoint forwards OpenAI-compatible chat completion requests to 
 
 Update the allowlist in `src/index.js` (`LIFTWING_ALLOWED_MODELS`) to enable additional models.
 
+## Testing the token budget
+
+`scripts/hf-max-tokens-test.sh` probes the `/hf` endpoint's token behaviour — useful when a reasoning model returns `finish_reason: "length"` with empty content.
+
+```sh
+PROXY_URL=https://your-worker.workers.dev \
+PAYLOAD=./my-real-request.json \
+./scripts/hf-max-tokens-test.sh
+```
+
+The default `confirm` test repeats one identical request at a high cap. That single run answers both questions worth asking: it shows whether truncation is a hard cut at the cap (truncated runs land on exactly `max_tokens`), and the spread of `completion_tokens` tells you how high the cap has to be.
+
+`PAYLOAD` is a JSON file containing a `.messages` array. Pass your real prompt — reasoning length is dominated by the actual input, so a toy prompt says nothing about your workload. Requires `curl` and `jq`; paces itself to stay under the 20 req/min rate limit (`SLEEP`).
+
+Follow-ups, only if the first run raises a question:
+
+| Test | Question it answers |
+| --- | --- |
+| `clamp` | Is the proxy shortening my budget? (checks `X-Proxy-Max-Tokens-Clamped`, incl. the `max_completion_tokens` path) |
+| `sweep` | At what cap does this prompt stop truncating? |
+| `variance` | Same as `confirm` without the interpretation |
+| `temp` | Is `temperature: 0` helping or causing runaway reasoning? |
+| `effort` | How much does `reasoning_effort` cut token use? |
+
+Results append to `hf-test-results/results.tsv` (`OUTDIR`) for further analysis.
+
 ## Development
 
 ```sh
