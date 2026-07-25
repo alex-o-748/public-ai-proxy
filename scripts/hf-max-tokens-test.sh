@@ -29,7 +29,8 @@
 #   REPEATS     default 8      (variance test)
 #   VAR_TOKENS  default 16384  (variance test cap)
 #   SLEEP       default 4      (proxy allows 20 req/min per IP)
-#   OUTDIR      default ./hf-test-results
+#   OUTDIR      default ./hf-test-results — rows append across runs, but the
+#               printed stats only ever cover the current invocation.
 
 set -uo pipefail
 
@@ -54,7 +55,10 @@ done
 
 mkdir -p "$OUTDIR"
 TSV="$OUTDIR/results.tsv"
-[[ -f "$TSV" ]] || printf 'test\tmodel\tfield\tmax_tokens\ttemp\teffort\thttp\tfinish\tcompletion_tok\tprompt_tok\treasoning_chars\tcontent_chars\tjson_ok\tsecs\tclamp_header\n' > "$TSV"
+# Stamped on every row so a re-run's stats are never pooled with an earlier
+# run's — pooling two different configs is exactly the error being measured.
+RUN_ID=${RUN_ID:-$(date +%Y%m%dT%H%M%S)}
+[[ -f "$TSV" ]] || printf 'test\tmodel\tfield\tmax_tokens\ttemp\teffort\thttp\tfinish\tcompletion_tok\tprompt_tok\treasoning_chars\tcontent_chars\tjson_ok\tsecs\tclamp_header\trun\n' > "$TSV"
 
 # The default prompt is a stand-in only. Reasoning length is dominated by the
 # real input, so pass PAYLOAD=<your file> to measure your actual workload.
@@ -141,9 +145,9 @@ run_once() {
       "$([[ "$clamp" != "-" ]] && echo "  [clamped: $clamp]")"
   fi
 
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$label" "$MODEL" "$field" "$value" "$temp" "${effort:--}" "$http" "$finish" \
-    "$ctok" "$ptok" "$reasoning" "$content" "$json_ok" "$secs" "$clamp" >> "$TSV"
+    "$ctok" "$ptok" "$reasoning" "$content" "$json_ok" "$secs" "$clamp" "$RUN_ID" >> "$TSV"
 
   rm -f "$hdr" "$hdr.err"
   sleep "$SLEEP"
@@ -178,7 +182,7 @@ test_confirm() {
 # Reports whether the observed data matches the truncation model above.
 verdict_variance() {
   local rows exact_cap n_trunc n straddle_lo straddle_hi slowest
-  rows=$(awk -F'\t' '$1 ~ /^variance-/' "$TSV")
+  rows=$(awk -F'\t' -v r="$RUN_ID" '$1 ~ /^variance-/ && $16==r' "$TSV")
   n=$(wc -l <<<"$rows" | tr -d ' ')
   n_trunc=$(awk -F'\t' '$8=="length"' <<<"$rows" | wc -l | tr -d ' ')
   exact_cap=$(awk -F'\t' -v c="$VAR_TOKENS" '$8=="length" && $9==c' <<<"$rows" | wc -l | tr -d ' ')
@@ -250,7 +254,7 @@ summarize_variance() {
   # Sort externally rather than in awk: asort() is a gawk extension and is
   # absent from mawk and BSD awk (macOS).
   local sorted
-  sorted=$(awk -F'\t' '$1 ~ /^variance-/ {print $9}' "$TSV" | sort -n)
+  sorted=$(awk -F'\t' -v r="$RUN_ID" '$1 ~ /^variance-/ && $16==r {print $9}' "$TSV" | sort -n)
   if [[ -z "$sorted" ]]; then echo "  (no rows)"; return; fi
 
   local n min med max trunc ok
@@ -258,8 +262,8 @@ summarize_variance() {
   min=$(head -n1 <<<"$sorted")
   max=$(tail -n1 <<<"$sorted")
   med=$(awk -v n="$n" 'NR==int((n+1)/2){print; exit}' <<<"$sorted")
-  trunc=$(awk -F'\t' '$1 ~ /^variance-/ && $8=="length"' "$TSV" | wc -l | tr -d ' ')
-  ok=$(awk -F'\t' '$1 ~ /^variance-/ && $13=="yes"' "$TSV" | wc -l | tr -d ' ')
+  trunc=$(awk -F'\t' -v r="$RUN_ID" '$1 ~ /^variance-/ && $16==r && $8=="length"' "$TSV" | wc -l | tr -d ' ')
+  ok=$(awk -F'\t' -v r="$RUN_ID" '$1 ~ /^variance-/ && $16==r && $13=="yes"' "$TSV" | wc -l | tr -d ' ')
 
   printf '\n  runs=%s  min=%s  median=%s  max=%s\n' "$n" "$min" "$med" "$max"
   printf '  truncated (finish=length): %s/%s\n' "$trunc" "$n"
@@ -280,8 +284,8 @@ test_temp() {
       run_once "temp-$t-$i" max_tokens "$VAR_TOKENS" "$t" ""
     done
   done
-  awk -F'\t' '
-    $1 ~ /^temp-/ { split($1,p,"-"); t=p[2]; n[t]++; s[t]+=$9; if($9>mx[t]) mx[t]=$9; if($8=="length") tr[t]++ }
+  awk -F'\t' -v RUN="$RUN_ID" '
+    $16==RUN && $1 ~ /^temp-/ { split($1,p,"-"); t=p[2]; n[t]++; s[t]+=$9; if($9>mx[t]) mx[t]=$9; if($8=="length") tr[t]++ }
     END { print ""; for (t in n) printf "  temp=%-4s runs=%d  mean_ctok=%d  max_ctok=%d  truncated=%d\n", t, n[t], s[t]/n[t], mx[t], tr[t]+0 }
   ' "$TSV"
 }
@@ -314,4 +318,4 @@ esac
 
 hr "Done. Full results: $TSV"
 echo "Columns: test model field max_tokens temp effort http finish completion_tok"
-echo "         prompt_tok reasoning_chars content_chars json_ok secs clamp_header"
+echo "         prompt_tok reasoning_chars content_chars json_ok secs clamp_header run"
