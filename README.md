@@ -9,7 +9,7 @@ A Cloudflare Worker that proxies requests to the [PublicAI](https://publicai.co)
 - **Rate Limiting** — Per-IP rate limiting (20 requests/minute) using in-memory buckets
 - **CORS** — Configured for Wikipedia origins (`en.wikipedia.org`, `www.wikipedia.org`, `commons.wikimedia.org`)
 - **Verification Logging** — `/log` endpoint records citation verification results to a Neon PostgreSQL database
-- **URL Fetching** — `?fetch=<url>` extracts text content from external pages (scripts, styles, nav stripped; 12k char limit)
+- **URL Fetching** — `?fetch=<url>` extracts text content from external pages (scripts, styles, nav stripped; 100k char limit)
 - **Debug Endpoints** — `?ping` for reachability checks, `?neon=test` for database connectivity
 
 ## Endpoints
