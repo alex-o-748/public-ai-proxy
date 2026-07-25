@@ -13,7 +13,7 @@ const HF_ALLOWED_MODELS = new Set([
   "Qwen/Qwen3-32B",
   "deepseek-ai/DeepSeek-V3.2-Exp",
 ]);
-const HF_MAX_TOKENS = 4096;
+const HF_MAX_TOKENS = 16384;
 const HF_MAX_BODY_BYTES = 200 * 1024;
 const HF_UPSTREAM_TIMEOUT_MS = 60_000;
 
