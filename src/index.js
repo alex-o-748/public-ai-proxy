@@ -385,7 +385,11 @@ export default {
         "Api-User-Agent": LIFTWING_USER_AGENT,
       };
       // Approved-bot JWT, if granted — lifts the shared anonymous rate limit.
-      if (env.LIFTWING_TOKEN) {
+      // The gateway parses any Authorization header as a JWT and 401s malformed
+      // ones, so only attach a token with the Header.Payload.Signature shape.
+      // A blank/placeholder secret then falls back to anonymous access rather
+      // than 401ing every request.
+      if (typeof env.LIFTWING_TOKEN === "string" && env.LIFTWING_TOKEN.split(".").length === 3) {
         upstreamHeaders["Authorization"] = `Bearer ${env.LIFTWING_TOKEN}`;
       }
 
