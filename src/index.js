@@ -379,6 +379,9 @@ export default {
 
       const upstreamHeaders = {
         "Content-Type": "application/json",
+        // Wikimedia's gateway enforces a User-Agent policy; send both the
+        // standard header and the Api-User-Agent variant it documents.
+        "User-Agent": LIFTWING_USER_AGENT,
         "Api-User-Agent": LIFTWING_USER_AGENT,
       };
       // Approved-bot JWT, if granted — lifts the shared anonymous rate limit.
@@ -407,7 +410,11 @@ export default {
       }
 
       if (upstream.status === 401 || upstream.status === 403) {
-        return jsonError(502, "Upstream auth failed", cors);
+        // Surface the upstream reason — it's usually a User-Agent policy
+        // block or a rejected Authorization token, which the generic
+        // message would otherwise hide.
+        const detail = (await upstream.text()).slice(0, 300);
+        return jsonError(502, `Upstream auth failed (${upstream.status}): ${detail}`, cors);
       }
       if (upstream.status === 429) {
         const ra = upstream.headers.get("retry-after");
