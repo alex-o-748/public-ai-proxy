@@ -51,7 +51,7 @@ paths:
         Behaviour depends on which query parameter is provided:
 
         - `?fetch=<url>` — downloads the target URL, extracts plain text from
-          HTML or PDF, and returns up to 12 000 characters.
+          HTML or PDF, and returns up to 100 000 characters.
         - `?fetch=<url>&page=<n>` — same as above but returns only page *n*
           of a PDF (1-indexed).
         - `?ping` — returns basic reachability / CORS debug information.
@@ -264,7 +264,7 @@ components:
       properties:
         content:
           type: string
-          maxLength: 12000
+          maxLength: 100000
           description: Plain text extracted from the HTML page (scripts, styles, nav, header, and footer removed).
           example: "Wikipedia is a free online encyclopedia..."
 
@@ -278,7 +278,7 @@ components:
       properties:
         content:
           type: string
-          maxLength: 12000
+          maxLength: 100000
           description: Plain text extracted from the PDF.
         pdf:
           type: boolean
