@@ -6,6 +6,7 @@ A Cloudflare Worker that proxies requests to the [PublicAI](https://publicai.co)
 
 - **API Proxying** — Forwards chat completion requests to PublicAI's `/v1/chat/completions` endpoint
 - **HuggingFace Proxy** — `/hf` route proxies to HuggingFace Inference Providers (`router.huggingface.co`) with a model allowlist
+- **Lift Wing Proxy** — `/liftwing` route proxies to Wikimedia's Lift Wing LLM service (`api.wikimedia.org`), which hosts open-weight Qwen models with an OpenAI-compatible API
 - **Rate Limiting** — Per-IP rate limiting (20 requests/minute) using in-memory buckets
 - **CORS** — Configured for Wikipedia origins (`en.wikipedia.org`, `www.wikipedia.org`, `commons.wikimedia.org`)
 - **Verification Logging** — `/log` endpoint records citation verification results to a Neon PostgreSQL database
@@ -18,6 +19,7 @@ A Cloudflare Worker that proxies requests to the [PublicAI](https://publicai.co)
 |--------|-------------|-------------|
 | `POST` | `/` | Proxies request body to PublicAI chat completions |
 | `POST` | `/hf` | Proxies chat completions to HuggingFace Inference Providers (allowlisted models only) |
+| `POST` | `/liftwing` | Proxies chat completions to Wikimedia Lift Wing (allowlisted Qwen models only) |
 | `POST` | `/log` | Logs a citation verification result to the database |
 | `GET` | `/?fetch=<url>` | Fetches and extracts text content from a URL |
 | `GET` | `/?ping` | Returns timestamp, IP, and CORS status |
@@ -40,7 +42,12 @@ Configure these via `wrangler secret put`:
 wrangler secret put publicai        # PublicAI API bearer token
 wrangler secret put HF_TOKEN        # HuggingFace Inference Providers token (for /hf)
 wrangler secret put DATABASE_URL    # Neon PostgreSQL connection string
+wrangler secret put LIFTWING_TOKEN  # (optional) Lift Wing approved-bot JWT (for /liftwing)
 ```
+
+`LIFTWING_TOKEN` is optional: the Lift Wing public API works anonymously, but
+anonymous traffic shares a coarse rate limit. Once the Wikimedia ML team grants
+an approved-bot JWT, set it here to use the higher tier.
 
 The `DATABASE_URL` should be a standard PostgreSQL connection string:
 ```
@@ -76,6 +83,21 @@ The `/hf` endpoint forwards OpenAI-compatible chat completion requests to `https
 - **Error mapping** — upstream `401`/`403` become `502`; upstream `5xx` become `502`; `429` is passed through with `retry-after`.
 
 Update the allowlist in `src/index.js` (`HF_ALLOWED_MODELS`) to enable additional models.
+
+### Lift Wing Proxy (`/liftwing`)
+
+The `/liftwing` endpoint forwards OpenAI-compatible chat completion requests to Wikimedia's Lift Wing LLM service. Lift Wing routes by model name in the URL path, so the request is sent to `https://api.wikimedia.org/service/lw/inference/v1/models/<model>/openai/v1/chat/completions`.
+
+- **Allowlisted models** — only models in `LIFTWING_ALLOWED_MODELS` are accepted (currently `llm-qwen3-14b`, `llm-qwen36-27b`); requests with other models return `400`.
+- **Body limit** — requests larger than 200 KB return `413`.
+- **Token cap** — `max_tokens` is clamped to `4096`.
+- **Upstream timeout** — 60 s; aborted requests return `504`.
+- **Error mapping** — upstream `401`/`403` become `502`; upstream `5xx` become `502`; `429` is passed through with `retry-after`.
+- **Auth** — anonymous by default; if the `LIFTWING_TOKEN` secret is set it is sent as a `Bearer` token to use the approved-bot rate-limit tier. An `Api-User-Agent` header identifies the proxy to Wikimedia.
+- **`<think>` stripping** — Qwen3 reasoning models may prepend `<think>…</think>` chain-of-thought before the answer. For non-streaming responses, these blocks are stripped from each choice's message content so callers receive clean, parseable output. Streaming responses (`stream: true`) pass through untouched — the client should strip the tags itself.
+- **Structured output** — `response_format` (e.g. JSON schema) in the request body is forwarded as-is; whether constrained decoding is honored depends on the upstream vLLM configuration.
+
+Update the allowlist in `src/index.js` (`LIFTWING_ALLOWED_MODELS`) to enable additional models.
 
 ## Development
 
