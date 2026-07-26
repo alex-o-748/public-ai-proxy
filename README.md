@@ -81,6 +81,7 @@ The `/hf` endpoint forwards OpenAI-compatible chat completion requests to `https
 - **Token cap** — `max_tokens` is clamped to `16384`. Reasoning models (gpt-oss, Qwen3) spend output tokens on chain-of-thought before the answer, so a low cap can truncate the response before any answer content is produced; a generous ceiling is safe because these models stop early when done.
 - **Upstream timeout** — 60 s; aborted requests return `504`.
 - **Error mapping** — upstream `401`/`403` become `502`; upstream `5xx` become `502`; `429` is passed through with `retry-after`.
+- **No `<think>` stripping** — unlike `/liftwing`, responses pass through untouched. This is fine for `gpt-oss-20b` and `deepseek-ai/DeepSeek-V3.2-Exp`, which return reasoning in a separate response field rather than inline in `content`. It is *not* equivalent for `Qwen/Qwen3-32B`, which emits inline `<think>…</think>` here and would need the same stripping `/liftwing` applies. Keep that in mind when comparing results across the two routes.
 
 Update the allowlist in `src/index.js` (`HF_ALLOWED_MODELS`) to enable additional models.
 
@@ -91,10 +92,12 @@ The `/liftwing` endpoint forwards OpenAI-compatible chat completion requests to 
 - **Allowlisted models** — only models in `LIFTWING_ALLOWED_MODELS` are accepted (currently `llm-qwen3-14b`, `llm-qwen36-27b`); requests with other models return `400`.
 - **Body limit** — requests larger than 200 KB return `413`.
 - **Token cap** — `max_tokens` is clamped to `16384`. Reasoning models (gpt-oss, Qwen3) spend output tokens on chain-of-thought before the answer, so a low cap can truncate the response before any answer content is produced; a generous ceiling is safe because these models stop early when done.
-- **Upstream timeout** — 120 s; aborted requests return `504`. (Higher than `/hf`'s 60 s because Lift Wing runs at ~35 tok/s, so a long reasoning generation can take longer to complete.)
+- **Upstream timeout** — 90 s; aborted requests return `504`. (Higher than `/hf`'s 60 s because Lift Wing runs at ~35 tok/s, so a long reasoning generation can take longer to complete. Capped below Cloudflare's ~100 s edge request cutoff: a longer ceiling never fires, because the edge tears the request down first and the caller receives an HTML error page instead of the clean JSON `504`.)
 - **Error mapping** — upstream `401`/`403` become `502`; upstream `5xx` become `502`; `429` is passed through with `retry-after`.
 - **Auth** — anonymous by default; if the `LIFTWING_TOKEN` secret is set it is sent as a `Bearer` token to use the approved-bot rate-limit tier. An `Api-User-Agent` header identifies the proxy to Wikimedia.
 - **`<think>` stripping** — Qwen3 reasoning models may prepend `<think>…</think>` chain-of-thought before the answer. For non-streaming responses, these blocks are stripped from each choice's message content so callers receive clean, parseable output. Streaming responses (`stream: true`) pass through untouched — the client should strip the tags itself.
+
+  A generation cut short by `max_tokens` can stop mid-reasoning, leaving an opening `<think>` with no closing tag. An unterminated trailing block is stripped as well, so a truncated response arrives with **empty** content rather than a wall of reasoning text with no answer in it. Empty content plus `choices[].finish_reason === "length"` means the model ran out of room — callers should check `finish_reason` and treat that as truncation, not as a parse failure. The worker also logs these to `wrangler tail`.
 - **Structured output** — `response_format` (e.g. JSON schema) in the request body is forwarded as-is; whether constrained decoding is honored depends on the upstream vLLM configuration.
 
 Update the allowlist in `src/index.js` (`LIFTWING_ALLOWED_MODELS`) to enable additional models.

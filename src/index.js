@@ -28,7 +28,10 @@ const LIFTWING_ALLOWED_MODELS = new Set([
 ]);
 const LIFTWING_MAX_TOKENS = 16384;
 const LIFTWING_MAX_BODY_BYTES = 200 * 1024;
-const LIFTWING_UPSTREAM_TIMEOUT_MS = 120_000;
+// Kept under Cloudflare's edge request cutoff (~100 s): a longer ceiling never
+// fires, because the edge tears the request down first and the caller gets an
+// HTML error page instead of the clean JSON 504 below.
+const LIFTWING_UPSTREAM_TIMEOUT_MS = 90_000;
 const LIFTWING_BASE = "https://api.wikimedia.org/service/lw/inference/v1/models";
 // Wikimedia asks API clients to identify themselves with a descriptive UA.
 const LIFTWING_USER_AGENT =
@@ -37,8 +40,19 @@ const LIFTWING_USER_AGENT =
 // Qwen3 models are reasoning models: they may prepend their chain-of-thought
 // wrapped in <think>…</think> before the actual answer, which breaks a naive
 // JSON.parse of the message content. Strip those blocks from the final text.
+//
+// A generation cut short by max_tokens can stop mid-reasoning, so the closing
+// </think> never arrives. Matching only complete pairs would leave that content
+// untouched, handing the caller a wall of reasoning with no answer in it — which
+// fails to parse and looks like the model emitted garbage, when in fact it just
+// ran out of room. Drop an unterminated trailing block too, so truncated
+// responses come back empty (an unambiguous signal) rather than misleading.
+// Callers should treat choices[].finish_reason === "length" as truncation.
 function stripThinkTags(text) {
-  return text.replace(/<think>[\s\S]*?<\/think>/gi, "").replace(/^\s+/, "");
+  return text
+    .replace(/<think>[\s\S]*?<\/think>/gi, "")
+    .replace(/<think>[\s\S]*$/i, "")
+    .replace(/^\s+/, "");
 }
 
 function jsonError(status, message, cors, extraHeaders) {
@@ -460,6 +474,14 @@ export default {
         for (const choice of payload.choices) {
           if (choice && choice.message && typeof choice.message.content === 'string') {
             choice.message.content = stripThinkTags(choice.message.content);
+            // Truncated mid-reasoning: nothing survives the strip. Log it so a
+            // failed parse downstream is attributable to the token cap rather
+            // than to the model's output quality.
+            if (choice.finish_reason === 'length' && choice.message.content === '') {
+              console.warn(
+                `liftwing: ${modelId} truncated during reasoning (finish_reason=length), no answer content`
+              );
+            }
           }
         }
       }
