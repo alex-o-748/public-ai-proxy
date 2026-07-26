@@ -78,7 +78,7 @@ The `/hf` endpoint forwards OpenAI-compatible chat completion requests to `https
 
 - **Allowlisted models** — only models in `HF_ALLOWED_MODELS` are accepted (currently `openai/gpt-oss-20b`, `Qwen/Qwen3-32B`, `deepseek-ai/DeepSeek-V3.2-Exp`); requests with other models return `400`. Provider suffixes after `:` are stripped before checking.
 - **Body limit** — requests larger than 200 KB return `413`.
-- **Token cap** — `max_tokens` is clamped to `4096`.
+- **Token cap** — `max_tokens` is clamped to `16384`. Reasoning models (gpt-oss, Qwen3) spend output tokens on chain-of-thought before the answer, so a low cap can truncate the response before any answer content is produced; a generous ceiling is safe because these models stop early when done.
 - **Upstream timeout** — 60 s; aborted requests return `504`.
 - **Error mapping** — upstream `401`/`403` become `502`; upstream `5xx` become `502`; `429` is passed through with `retry-after`.
 
@@ -90,8 +90,8 @@ The `/liftwing` endpoint forwards OpenAI-compatible chat completion requests to 
 
 - **Allowlisted models** — only models in `LIFTWING_ALLOWED_MODELS` are accepted (currently `llm-qwen3-14b`, `llm-qwen36-27b`); requests with other models return `400`.
 - **Body limit** — requests larger than 200 KB return `413`.
-- **Token cap** — `max_tokens` is clamped to `4096`.
-- **Upstream timeout** — 60 s; aborted requests return `504`.
+- **Token cap** — `max_tokens` is clamped to `16384`. Reasoning models (gpt-oss, Qwen3) spend output tokens on chain-of-thought before the answer, so a low cap can truncate the response before any answer content is produced; a generous ceiling is safe because these models stop early when done.
+- **Upstream timeout** — 120 s; aborted requests return `504`. (Higher than `/hf`'s 60 s because Lift Wing runs at ~35 tok/s, so a long reasoning generation can take longer to complete.)
 - **Error mapping** — upstream `401`/`403` become `502`; upstream `5xx` become `502`; `429` is passed through with `retry-after`.
 - **Auth** — anonymous by default; if the `LIFTWING_TOKEN` secret is set it is sent as a `Bearer` token to use the approved-bot rate-limit tier. An `Api-User-Agent` header identifies the proxy to Wikimedia.
 - **`<think>` stripping** — Qwen3 reasoning models may prepend `<think>…</think>` chain-of-thought before the answer. For non-streaming responses, these blocks are stripped from each choice's message content so callers receive clean, parseable output. Streaming responses (`stream: true`) pass through untouched — the client should strip the tags itself.

@@ -13,7 +13,7 @@ const HF_ALLOWED_MODELS = new Set([
   "Qwen/Qwen3-32B",
   "deepseek-ai/DeepSeek-V3.2-Exp",
 ]);
-const HF_MAX_TOKENS = 4096;
+const HF_MAX_TOKENS = 16384;
 const HF_MAX_BODY_BYTES = 200 * 1024;
 const HF_UPSTREAM_TIMEOUT_MS = 60_000;
 
@@ -26,9 +26,9 @@ const LIFTWING_ALLOWED_MODELS = new Set([
   "llm-qwen3-14b",
   "llm-qwen36-27b",
 ]);
-const LIFTWING_MAX_TOKENS = 4096;
+const LIFTWING_MAX_TOKENS = 16384;
 const LIFTWING_MAX_BODY_BYTES = 200 * 1024;
-const LIFTWING_UPSTREAM_TIMEOUT_MS = 60_000;
+const LIFTWING_UPSTREAM_TIMEOUT_MS = 120_000;
 const LIFTWING_BASE = "https://api.wikimedia.org/service/lw/inference/v1/models";
 // Wikimedia asks API clients to identify themselves with a descriptive UA.
 const LIFTWING_USER_AGENT =
@@ -379,10 +379,17 @@ export default {
 
       const upstreamHeaders = {
         "Content-Type": "application/json",
+        // Wikimedia's gateway enforces a User-Agent policy; send both the
+        // standard header and the Api-User-Agent variant it documents.
+        "User-Agent": LIFTWING_USER_AGENT,
         "Api-User-Agent": LIFTWING_USER_AGENT,
       };
       // Approved-bot JWT, if granted — lifts the shared anonymous rate limit.
-      if (env.LIFTWING_TOKEN) {
+      // The gateway parses any Authorization header as a JWT and 401s malformed
+      // ones, so only attach a token with the Header.Payload.Signature shape.
+      // A blank/placeholder secret then falls back to anonymous access rather
+      // than 401ing every request.
+      if (typeof env.LIFTWING_TOKEN === "string" && env.LIFTWING_TOKEN.split(".").length === 3) {
         upstreamHeaders["Authorization"] = `Bearer ${env.LIFTWING_TOKEN}`;
       }
 
@@ -407,7 +414,11 @@ export default {
       }
 
       if (upstream.status === 401 || upstream.status === 403) {
-        return jsonError(502, "Upstream auth failed", cors);
+        // Surface the upstream reason — it's usually a User-Agent policy
+        // block or a rejected Authorization token, which the generic
+        // message would otherwise hide.
+        const detail = (await upstream.text()).slice(0, 300);
+        return jsonError(502, `Upstream auth failed (${upstream.status}): ${detail}`, cors);
       }
       if (upstream.status === 429) {
         const ra = upstream.headers.get("retry-after");
