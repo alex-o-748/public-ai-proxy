@@ -10,6 +10,7 @@ A Cloudflare Worker that proxies requests to the [PublicAI](https://publicai.co)
 - **Rate Limiting** — Per-IP rate limiting (20 requests/minute) using in-memory buckets
 - **CORS** — Configured for Wikipedia origins (`en.wikipedia.org`, `www.wikipedia.org`, `commons.wikimedia.org`)
 - **Verification Logging** — `/log` endpoint records citation verification results to a Neon PostgreSQL database
+- **Feedback** — `/feedback` endpoint records user ratings and verdict corrections to a Neon PostgreSQL database
 - **URL Fetching** — `?fetch=<url>` extracts text content from external pages (scripts, styles, nav stripped; 100k char limit)
 - **Debug Endpoints** — `?ping` for reachability checks, `?neon=test` for database connectivity
 
@@ -21,6 +22,7 @@ A Cloudflare Worker that proxies requests to the [PublicAI](https://publicai.co)
 | `POST` | `/hf` | Proxies chat completions to HuggingFace Inference Providers (allowlisted models only) |
 | `POST` | `/liftwing` | Proxies chat completions to Wikimedia Lift Wing (allowlisted Qwen models only) |
 | `POST` | `/log` | Logs a citation verification result to the database |
+| `POST` | `/feedback` | Logs a user rating or verdict correction for a check |
 | `GET` | `/?fetch=<url>` | Fetches and extracts text content from a URL |
 | `GET` | `/?ping` | Returns timestamp, IP, and CORS status |
 | `GET` | `/?neon=test` | Tests the Neon database connection |
@@ -72,6 +74,39 @@ CREATE TABLE verification_logs (
 );
 ```
 
+Then apply this migration to add feedback support (richer `/log` fields, a
+stable `check_id` to join on, and the new `feedback` table):
+
+```sql
+ALTER TABLE verification_logs
+  ADD COLUMN IF NOT EXISTS check_id TEXT,
+  ADD COLUMN IF NOT EXISTS kind TEXT DEFAULT 'source',
+  ADD COLUMN IF NOT EXISTS model TEXT,
+  ADD COLUMN IF NOT EXISTS claim_text TEXT,
+  ADD COLUMN IF NOT EXISTS llm_comments TEXT,
+  ADD COLUMN IF NOT EXISTS reason_type TEXT;
+
+CREATE UNIQUE INDEX IF NOT EXISTS verification_logs_check_id_idx
+  ON verification_logs (check_id);
+
+CREATE TABLE IF NOT EXISTS feedback (
+  id SERIAL PRIMARY KEY,
+  ts TIMESTAMPTZ DEFAULT now(),
+  check_id TEXT,
+  rating SMALLINT,
+  corrected_verdict TEXT,
+  wiki_section TEXT,
+  client_id TEXT
+);
+
+CREATE INDEX IF NOT EXISTS feedback_check_id_idx ON feedback (check_id);
+```
+
+`feedback.check_id` is intentionally not a foreign key: `/log` and
+`/feedback` are independent fire-and-forget POSTs, and a rating shouldn't be
+rejected just because its matching log row is missing or arrived late. Join
+the two with a `LEFT JOIN ... USING (check_id)`.
+
 ### HuggingFace Proxy (`/hf`)
 
 The `/hf` endpoint forwards OpenAI-compatible chat completion requests to `https://router.huggingface.co/v1/chat/completions` using the `HF_TOKEN` secret.
@@ -98,6 +133,28 @@ The `/liftwing` endpoint forwards OpenAI-compatible chat completion requests to 
 - **Structured output** — `response_format` (e.g. JSON schema) in the request body is forwarded as-is; whether constrained decoding is honored depends on the upstream vLLM configuration.
 
 Update the allowlist in `src/index.js` (`LIFTWING_ALLOWED_MODELS`) to enable additional models.
+
+### Verification Logging & Feedback (`/log`, `/feedback`)
+
+Both endpoints are unauthenticated and publicly reachable from Wikipedia, so
+all fields are treated as untrusted input: wrong types are coerced to `null`
+and strings are truncated rather than rejected, since malformed telemetry
+from one client shouldn't break logging for everyone else. Neither endpoint
+ever records a username or IP address.
+
+- **`/log`** — fire-and-forget; a bad or oversized body still gets a `200`
+  so a telemetry failure never surfaces to the user. Inserts use
+  `ON CONFLICT (check_id) DO NOTHING` so a duplicate id can't throw.
+  `confidence` is coerced with `Number()` and dropped to `null` if it isn't
+  finite (an LLM occasionally returns a string like `"High"`).
+- **`/feedback`** — a rating is a deliberate user action, so the insert is
+  awaited: `200` on success, `413`/`400` on an oversized or non-JSON body,
+  `500` on a genuine insert failure. A single `check_id` can have multiple
+  feedback rows (e.g. a thumbs-down followed by a separate corrected-verdict
+  row) — these are never merged or upserted.
+
+Update the allowlists in `src/index.js` (`KIND_VALUES`, `VERDICT_VALUES`) if
+the client adds new `kind` or verdict values.
 
 ## Development
 
