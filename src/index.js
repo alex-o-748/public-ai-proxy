@@ -46,6 +46,54 @@ function jsonError(status, message, cors, extraHeaders) {
   return new Response(JSON.stringify({ error: { message } }), { status, headers });
 }
 
+// ===== /log and /feedback payload sanitization =====
+// Both endpoints are unauthenticated and publicly reachable, so every field
+// is treated as untrusted: wrong types and oversized strings are coerced to
+// null/truncated rather than rejected outright, since malformed telemetry
+// shouldn't take down logging for everyone else.
+const TELEMETRY_MAX_BODY_BYTES = 64 * 1024;
+const KIND_VALUES = new Set(["source", "group"]);
+const VERDICT_VALUES = new Set([
+  "SUPPORTED",
+  "PARTIALLY SUPPORTED",
+  "NOT SUPPORTED",
+  "SOURCE UNAVAILABLE",
+]);
+
+function sanitizeString(value, maxLen) {
+  if (typeof value !== "string") return null;
+  return value.length > maxLen ? value.slice(0, maxLen) : value;
+}
+
+function sanitizeEnum(value, allowed) {
+  return typeof value === "string" && allowed.has(value) ? value : null;
+}
+
+function sanitizeConfidence(value) {
+  if (value === null || value === undefined) return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+function sanitizeRating(value) {
+  return value === 1 || value === -1 ? value : null;
+}
+
+// Reads and JSON-parses a request body, enforcing a size cap first so an
+// oversized body can't be fully buffered just to get rejected. Returns
+// { body } on success or { errorResponse } to return as-is.
+async function readJsonBody(request, cors) {
+  const raw = await request.text();
+  if (raw.length > TELEMETRY_MAX_BODY_BYTES) {
+    return { errorResponse: jsonError(413, "Request body too large", cors) };
+  }
+  try {
+    return { body: JSON.parse(raw) };
+  } catch {
+    return { errorResponse: jsonError(400, "Invalid JSON", cors) };
+  }
+}
+
 // ===== Neon SQL-over-HTTP helper =====
 // Parses a postgres:// connection string and calls Neon's HTTP endpoint.
 // No npm packages needed — just fetch().
@@ -89,9 +137,9 @@ export default {
 
     const url = new URL(request.url);
 
-    // Preflight — /log needs open CORS since it's called from Wikipedia
+    // Preflight — /log and /feedback need open CORS since they're called from Wikipedia
     if (request.method === "OPTIONS") {
-      if (url.pathname === '/log') {
+      if (url.pathname === '/log' || url.pathname === '/feedback') {
         return new Response(null, {
           status: 204,
           headers: {
@@ -149,21 +197,80 @@ export default {
     }
 
     // ===== /log endpoint — write verification results to Neon =====
+    // Fire-and-forget: telemetry writes must never surface an error to the
+    // client, so a malformed/oversized body still gets a 2xx-ish response
+    // here rather than throwing (the size/JSON checks below are about
+    // bounding what we try to write, not about failing the request).
     if (url.pathname === '/log' && request.method === 'POST') {
-      const body = await request.json();
-      ctx.waitUntil(
-        queryNeon(
+      const logCors = { 'Access-Control-Allow-Origin': '*' };
+      const raw = await request.text();
+      if (raw.length > TELEMETRY_MAX_BODY_BYTES) {
+        return new Response('ok', { headers: logCors });
+      }
+      let body;
+      try {
+        body = JSON.parse(raw);
+      } catch {
+        return new Response('ok', { headers: logCors });
+      }
+      if (body && typeof body === 'object') {
+        ctx.waitUntil(
+          queryNeon(
+            env.DATABASE_URL,
+            `INSERT INTO verification_logs
+              (check_id, kind, article_url, article_title, citation_number, source_url,
+               provider, model, verdict, confidence, reason_type, claim_text, llm_comments)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+             ON CONFLICT (check_id) DO NOTHING`,
+            [
+              sanitizeString(body.check_id, 64),
+              sanitizeEnum(body.kind, KIND_VALUES),
+              sanitizeString(body.article_url, 2000),
+              sanitizeString(body.article_title, 2000),
+              sanitizeString(body.citation_number, 2000),
+              sanitizeString(body.source_url, 2000),
+              sanitizeString(body.provider, 2000),
+              sanitizeString(body.model, 2000),
+              sanitizeString(body.verdict, 2000),
+              sanitizeConfidence(body.confidence),
+              sanitizeString(body.reason_type, 2000),
+              sanitizeString(body.claim_text, 4000),
+              sanitizeString(body.llm_comments, 4000),
+            ]
+          ).catch(err => console.error('Log write failed:', err.message))
+        );
+      }
+      return new Response('ok', { headers: logCors });
+    }
+
+    // ===== /feedback endpoint — write a rating/correction row to Neon =====
+    // Unlike /log, this is a deliberate user action (thumbs up/down or a
+    // correction), so it's awaited and a genuine insert failure is reported
+    // as a 500 rather than swallowed.
+    if (url.pathname === '/feedback' && request.method === 'POST') {
+      const feedbackCors = { 'Access-Control-Allow-Origin': '*' };
+      const { body, errorResponse } = await readJsonBody(request, feedbackCors);
+      if (errorResponse) return errorResponse;
+
+      try {
+        await queryNeon(
           env.DATABASE_URL,
-          `INSERT INTO verification_logs
-            (article_url, article_title, citation_number, source_url, provider, verdict, confidence)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-          [body.article_url, body.article_title, body.citation_number,
-           body.source_url, body.provider, body.verdict, body.confidence]
-        ).catch(err => console.error('Log write failed:', err.message))
-      );
-      return new Response('ok', {
-        headers: { 'Access-Control-Allow-Origin': '*' }
-      });
+          `INSERT INTO feedback (check_id, rating, corrected_verdict, wiki_section, client_id)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [
+            sanitizeString(body.check_id, 64),
+            sanitizeRating(body.rating),
+            sanitizeEnum(body.corrected_verdict, VERDICT_VALUES),
+            sanitizeString(body.wiki_section, 300),
+            sanitizeString(body.client_id, 64),
+          ]
+        );
+      } catch (err) {
+        console.error('Feedback write failed:', err.message);
+        return new Response('error', { status: 500, headers: feedbackCors });
+      }
+
+      return new Response('ok', { headers: feedbackCors });
     }
 
     // NEW: Handle URL fetch requests
