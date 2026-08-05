@@ -74,6 +74,9 @@ CREATE TABLE verification_logs (
 );
 ```
 
+(On a fresh database you can declare `citation_number TEXT` directly and skip
+the corresponding `ALTER COLUMN` in the migration below.)
+
 Then apply this migration to add feedback support (richer `/log` fields, a
 stable `check_id` to join on, and the new `feedback` table):
 
@@ -85,6 +88,11 @@ ALTER TABLE verification_logs
   ADD COLUMN IF NOT EXISTS claim_text TEXT,
   ADD COLUMN IF NOT EXISTS llm_comments TEXT,
   ADD COLUMN IF NOT EXISTS reason_type TEXT;
+
+-- citation_number must be TEXT: a "group" row carries a comma-joined list of
+-- citations ("12, 13"), which cannot be stored in the original INT column.
+-- int -> text is a lossless cast; existing values become digit strings.
+ALTER TABLE verification_logs ALTER COLUMN citation_number TYPE TEXT;
 
 CREATE UNIQUE INDEX IF NOT EXISTS verification_logs_check_id_idx
   ON verification_logs (check_id);

@@ -79,6 +79,15 @@ function sanitizeRating(value) {
   return value === 1 || value === -1 ? value : null;
 }
 
+// citation_number is TEXT, not INT: a "group" row carries a comma-joined list
+// ("12, 13") which has no integer representation. Older cached copies of the
+// user script still post it as a bare number, so accept those too rather than
+// dropping the value on the floor.
+function sanitizeCitationNumber(value, maxLen) {
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  return sanitizeString(value, maxLen);
+}
+
 // Reads and JSON-parses a request body, enforcing a size cap first so an
 // oversized body can't be fully buffered just to get rejected. Returns
 // { body } on success or { errorResponse } to return as-is.
@@ -227,7 +236,7 @@ export default {
               sanitizeEnum(body.kind, KIND_VALUES),
               sanitizeString(body.article_url, 2000),
               sanitizeString(body.article_title, 2000),
-              sanitizeString(body.citation_number, 2000),
+              sanitizeCitationNumber(body.citation_number, 2000),
               sanitizeString(body.source_url, 2000),
               sanitizeString(body.provider, 2000),
               sanitizeString(body.model, 2000),
