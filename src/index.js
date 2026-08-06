@@ -219,8 +219,8 @@ export default {
             env.DATABASE_URL,
             `INSERT INTO verification_logs
               (check_id, kind, article_url, article_title, citation_number, source_url,
-               provider, model, verdict, confidence, reason_type, claim_text, llm_comments)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+               provider, model, verdict, confidence, reason_type, claim_text, llm_comments, revision_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
              ON CONFLICT (check_id) DO NOTHING`,
             [
               sanitizeString(body.check_id, 64),
@@ -236,6 +236,7 @@ export default {
               sanitizeString(body.reason_type, 2000),
               sanitizeString(body.claim_text, 4000),
               sanitizeString(body.llm_comments, 4000),
+              body.revision_id,
             ]
           ).catch(err => console.error('Log write failed:', err.message))
         );
