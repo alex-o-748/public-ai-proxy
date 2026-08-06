@@ -107,6 +107,22 @@ CREATE INDEX IF NOT EXISTS feedback_check_id_idx ON feedback (check_id);
 rejected just because its matching log row is missing or arrived late. Join
 the two with a `LEFT JOIN ... USING (check_id)`.
 
+Then apply this migration to record the article revision a check ran
+against:
+
+```sql
+ALTER TABLE verification_logs
+  ADD COLUMN IF NOT EXISTS revision_id BIGINT;
+```
+
+`revision_id` is nullable with no default and is not backfilled: existing
+rows genuinely don't know their revision, and `NULL` must stay
+distinguishable from a recorded revision — never backfill it with `0` or a
+guess. Apply this migration before deploying the Worker version that writes
+`revision_id`; the column must exist before the new `INSERT` runs (that
+write happens inside `ctx.waitUntil()`, so a missing-column error there is
+swallowed silently rather than surfaced).
+
 ### HuggingFace Proxy (`/hf`)
 
 The `/hf` endpoint forwards OpenAI-compatible chat completion requests to `https://router.huggingface.co/v1/chat/completions` using the `HF_TOKEN` secret.
