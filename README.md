@@ -29,6 +29,8 @@ A Cloudflare Worker that proxies requests to the [PublicAI](https://publicai.co)
 
 ## Setup
 
+Deployed Worker URL: `https://publicai-proxy.alaexis.workers.dev`
+
 ### Prerequisites
 
 - [Node.js](https://nodejs.org)
