@@ -127,7 +127,7 @@ swallowed silently rather than surfaced).
 
 The `/hf` endpoint forwards OpenAI-compatible chat completion requests to `https://router.huggingface.co/v1/chat/completions` using the `HF_TOKEN` secret.
 
-- **Allowlisted models** — only models in `HF_ALLOWED_MODELS` are accepted (currently `openai/gpt-oss-20b`, `Qwen/Qwen3-32B`, `deepseek-ai/DeepSeek-V3.2-Exp`); requests with other models return `400`. Provider suffixes after `:` are stripped before checking.
+- **Allowlisted models** — only models in `HF_ALLOWED_MODELS` are accepted (currently `openai/gpt-oss-20b`, `Qwen/Qwen3-32B`, `deepseek-ai/DeepSeek-V3`); requests with other models return `400`. Provider suffixes after `:` are stripped before checking.
 - **Body limit** — requests larger than 200 KB return `413`.
 - **Token cap** — `max_tokens` is clamped to `16384`. Reasoning models (gpt-oss, Qwen3) spend output tokens on chain-of-thought before the answer, so a low cap can truncate the response before any answer content is produced; a generous ceiling is safe because these models stop early when done.
 - **Upstream timeout** — 60 s; aborted requests return `504`.
