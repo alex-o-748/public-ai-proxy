@@ -125,6 +125,26 @@ guess. Apply this migration before deploying the Worker version that writes
 write happens inside `ctx.waitUntil()`, so a missing-column error there is
 swallowed silently rather than surfaced).
 
+Then apply this migration to record the quote the model pulled from the
+source, and how well that quote matched the source text:
+
+```sql
+ALTER TABLE verification_logs
+  ADD COLUMN IF NOT EXISTS source_quote TEXT,
+  ADD COLUMN IF NOT EXISTS quote_status TEXT;
+```
+
+`quote_status` holds one of `exact`, `normalized`, `partial`, `not-found`,
+`too-short`, `empty`, or `no-source`; the Worker coerces anything else to
+`NULL` rather than storing it, so a client typo never seeds a junk value into
+a column that gets grouped by. The client always sends one of the seven, so
+**`quote_status` being `NULL` on a new row means the value was dropped
+somewhere** — that is the check to run after deploying. As with `revision_id`,
+both columns must exist before the new `INSERT` ships (the error would
+otherwise be swallowed by `waitUntil()`, silently killing *all* `/log` writes,
+not just these two fields), and neither is backfilled: rows written earlier
+never carried these values and they are unrecoverable.
+
 ### HuggingFace Proxy (`/hf`)
 
 The `/hf` endpoint forwards OpenAI-compatible chat completion requests to `https://router.huggingface.co/v1/chat/completions` using the `HF_TOKEN` secret.
