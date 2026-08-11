@@ -53,17 +53,12 @@ function jsonError(status, message, cors, extraHeaders) {
 // shouldn't take down logging for everyone else.
 const TELEMETRY_MAX_BODY_BYTES = 64 * 1024;
 const KIND_VALUES = new Set(["source", "group"]);
-// Outcome of checking the model's source_quote against the source text it was
-// shown. Enumerated rather than free text so a client typo lands as null
-// instead of seeding a junk value into a column we group by.
+// Mirrors QUOTE_STATUS_LIST in the userscript repo
+// (alex-o-748/citation-checker-script, core/quote.js). That list is pinned by
+// tests/quote.test.js, so if a status is ever added there its test fails and
+// this Set is what needs updating — an unrecognized value is stored as NULL.
 const QUOTE_STATUS_VALUES = new Set([
-  "exact",
-  "normalized",
-  "partial",
-  "not-found",
-  "too-short",
-  "empty",
-  "no-source",
+  "exact", "normalized", "partial", "not-found", "too-short", "empty", "no-source",
 ]);
 const VERDICT_VALUES = new Set([
   "SUPPORTED",
