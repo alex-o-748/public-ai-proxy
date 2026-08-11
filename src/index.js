@@ -53,6 +53,18 @@ function jsonError(status, message, cors, extraHeaders) {
 // shouldn't take down logging for everyone else.
 const TELEMETRY_MAX_BODY_BYTES = 64 * 1024;
 const KIND_VALUES = new Set(["source", "group"]);
+// Outcome of checking the model's source_quote against the source text it was
+// shown. Enumerated rather than free text so a client typo lands as null
+// instead of seeding a junk value into a column we group by.
+const QUOTE_STATUS_VALUES = new Set([
+  "exact",
+  "normalized",
+  "partial",
+  "not-found",
+  "too-short",
+  "empty",
+  "no-source",
+]);
 const VERDICT_VALUES = new Set([
   "SUPPORTED",
   "PARTIALLY SUPPORTED",
@@ -219,8 +231,9 @@ export default {
             env.DATABASE_URL,
             `INSERT INTO verification_logs
               (check_id, kind, article_url, article_title, citation_number, source_url,
-               provider, model, verdict, confidence, reason_type, claim_text, llm_comments, revision_id)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+               provider, model, verdict, confidence, reason_type, claim_text, llm_comments, revision_id,
+               source_quote, quote_status)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
              ON CONFLICT (check_id) DO NOTHING`,
             [
               sanitizeString(body.check_id, 64),
@@ -236,7 +249,9 @@ export default {
               sanitizeString(body.reason_type, 2000),
               sanitizeString(body.claim_text, 4000),
               sanitizeString(body.llm_comments, 4000),
-              body.revision_id,
+              sanitizeConfidence(body.revision_id),
+              sanitizeString(body.source_quote, 4000),
+              sanitizeEnum(body.quote_status, QUOTE_STATUS_VALUES),
             ]
           ).catch(err => console.error('Log write failed:', err.message))
         );

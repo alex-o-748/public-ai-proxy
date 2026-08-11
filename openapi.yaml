@@ -138,6 +138,11 @@ paths:
         `verification_logs` table. The write is non-blocking (Cloudflare
         `waitUntil`). This endpoint has open CORS (`*`) to allow Wikipedia
         cross-origin requests.
+
+        Fire-and-forget: the response is always `200 ok`. An oversized body, an
+        unparseable body, or a failed insert is dropped silently rather than
+        reported, so a `200` confirms receipt only — never that a row was
+        written.
       requestBody:
         required: true
         content:
@@ -146,16 +151,14 @@ paths:
               $ref: '#/components/schemas/VerificationLogRequest'
       responses:
         '200':
-          description: Log entry accepted
+          description: |
+            Request received. Returned unconditionally, including for bodies
+            that were discarded without being written.
           content:
             text/plain:
               schema:
                 type: string
                 enum: [ok]
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '500':
-          $ref: '#/components/responses/InternalError'
 
     options:
       operationId: corsPreflightLog
@@ -353,51 +356,131 @@ components:
 
     VerificationLogRequest:
       type: object
-      description: Citation verification result to persist.
+      description: |
+        Citation verification result to persist. Every field is treated as
+        untrusted and sanitized rather than validated: a wrongly-typed value,
+        or a `kind`/`quote_status` outside its enum, is stored as `NULL`
+        instead of rejecting the request, and over-long strings are truncated
+        to the documented `maxLength`. The endpoint therefore answers `200`
+        even for a malformed body — `required` below describes what the client
+        always sends, not what the Worker enforces.
       required:
+        - check_id
+        - kind
         - article_url
         - article_title
         - citation_number
         - source_url
         - provider
+        - model
         - verdict
         - confidence
+        - quote_status
       properties:
+        check_id:
+          type: string
+          maxLength: 64
+          description: |
+            Client-generated identifier for this check, used to join against
+            `/feedback` rows. The insert is `ON CONFLICT (check_id) DO NOTHING`,
+            so re-posting the same `check_id` is a no-op.
+          example: "a1b2c3d4e5f6"
+        kind:
+          type: [string, "null"]
+          enum: [source, group, null]
+          description: |
+            Whether the check covered a single citation (`source`) or a group of
+            citations sharing one claim (`group`). Any other value stores `NULL`.
+          example: "source"
         article_url:
           type: string
           format: uri
+          maxLength: 2000
           description: Canonical URL of the Wikipedia article containing the citation.
           example: "https://en.wikipedia.org/wiki/Eiffel_Tower"
         article_title:
           type: string
+          maxLength: 2000
           description: Title of the Wikipedia article.
           example: "Eiffel Tower"
         citation_number:
-          type: integer
-          minimum: 1
-          description: 1-indexed position of the citation within the article.
-          example: 3
+          type: string
+          maxLength: 2000
+          description: |
+            Citation label(s) as rendered in the article — a string, not a
+            number. A group check carries every member's label, comma-joined.
+          examples: ["3", "3, 4"]
         source_url:
           type: string
           format: uri
+          maxLength: 2000
           description: URL of the cited source that was verified.
           example: "https://example.com/source-article"
         provider:
           type: string
-          description: Identifier of the LLM / service that performed the verification.
-          example: "publicai/gpt-4o"
+          maxLength: 2000
+          description: Identifier of the service that performed the verification.
+          example: "liftwing"
+        model:
+          type: string
+          maxLength: 2000
+          description: Model that produced the verdict.
+          example: "llm-qwen3-14b"
         verdict:
           type: string
-          description: Verification outcome.
-          enum: [supports, refutes, not_enough_info, error]
-          example: "supports"
+          maxLength: 2000
+          description: |
+            Verification outcome. The client sends one of `SUPPORTED`,
+            `PARTIALLY SUPPORTED`, `NOT SUPPORTED`, or `SOURCE UNAVAILABLE`,
+            but the Worker stores it as free text without enum-checking it.
+          example: "SUPPORTED"
         confidence:
-          type: number
-          format: float
+          type: [number, "null"]
           minimum: 0
-          maximum: 1
-          description: Model's confidence score for the verdict.
-          example: 0.92
+          maximum: 100
+          description: |
+            Model's confidence in the verdict, on a 0–100 scale (not 0–1).
+            A non-numeric value stores `NULL`.
+          example: 95
+        reason_type:
+          type: [string, "null"]
+          maxLength: 2000
+          description: |
+            Short machine-readable tag for why a source was unusable
+            (e.g. paywalled, unreachable). `null` when the check succeeded.
+          example: null
+        claim_text:
+          type: [string, "null"]
+          maxLength: 4000
+          description: The article text whose sourcing was checked.
+          example: "The tower is 330 metres tall."
+        llm_comments:
+          type: [string, "null"]
+          maxLength: 4000
+          description: The model's free-text rationale for its verdict.
+          example: "The source states a height of 330 m including antennas."
+        revision_id:
+          type: [integer, "null"]
+          description: |
+            `oldid` of the article revision the check ran against. Never
+            backfilled — `NULL` means the revision genuinely wasn't recorded.
+          example: 1302216593
+        source_quote:
+          type: [string, "null"]
+          maxLength: 4000
+          description: |
+            Passage the model quoted from the cited source to justify its
+            verdict. `null` when it offered no quote. The client truncates to
+            2000 characters.
+          example: "The tower stands 330 metres tall."
+        quote_status:
+          type: [string, "null"]
+          enum: [exact, normalized, partial, not-found, too-short, empty, no-source, null]
+          description: |
+            Result of matching `source_quote` against the source text the model
+            was shown. The client always sends one of the seven values, so a
+            stored `NULL` means the value was dropped or the enum was violated.
+          example: "partial"
 
     # ── Shared error shape ─────────────────────────────────────────────────────
 
