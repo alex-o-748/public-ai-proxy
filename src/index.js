@@ -316,7 +316,10 @@ export default {
           clearTimeout(timeout);
 
           if (!response.ok) {
-              return new Response(JSON.stringify({ error: `Source returned ${response.status}` }), {
+              return new Response(JSON.stringify({
+                  error: `Source returned ${response.status}`,
+                  status: response.status,
+              }), {
                   headers: { ...corsHeaders, 'Content-Type': 'application/json' }
               });
           }
