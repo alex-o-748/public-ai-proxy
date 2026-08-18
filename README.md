@@ -149,13 +149,28 @@ never carried these values and they are unrecoverable.
 
 The `/hf` endpoint forwards OpenAI-compatible chat completion requests to `https://router.huggingface.co/v1/chat/completions` using the `HF_TOKEN` secret.
 
-- **Allowlisted models** — only models in `HF_ALLOWED_MODELS` are accepted (currently `openai/gpt-oss-20b`, `Qwen/Qwen3-32B`, `deepseek-ai/DeepSeek-V3.2-Exp`); requests with other models return `400`. Provider suffixes after `:` are stripped before checking.
+- **Allowlisted models** — only models in `HF_ALLOWED_MODELS` are accepted (currently `openai/gpt-oss-20b`, `Qwen/Qwen3-32B`, `deepseek-ai/DeepSeek-V3.2-Exp`, `zai-org/GLM-5.2`); requests with other models return `400`. Provider suffixes after `:` are stripped before checking.
 - **Body limit** — requests larger than 200 KB return `413`.
 - **Token cap** — `max_tokens` is clamped to `16384`. Reasoning models (gpt-oss, Qwen3) spend output tokens on chain-of-thought before the answer, so a low cap can truncate the response before any answer content is produced; a generous ceiling is safe because these models stop early when done.
 - **Upstream timeout** — 60 s; aborted requests return `504`.
 - **Error mapping** — upstream `401`/`403` become `502`; upstream `5xx` become `502`; `429` is passed through with `retry-after`.
 
 Update the allowlist in `src/index.js` (`HF_ALLOWED_MODELS`) to enable additional models.
+
+#### Direct inference models
+
+Most allowlisted models are served by multiple providers behind HuggingFace's
+unified router. Some models — e.g. `zai-org/GLM-5.2` — aren't onboarded onto
+the router and only exist on HF's per-model serverless Inference API, so
+requests for them are sent to
+`https://api-inference.huggingface.co/models/<model>/v1/chat/completions`
+instead of `router.huggingface.co`, with the `:provider` suffix stripped
+(there's no provider to pick on that endpoint). Both endpoints get the same
+`Authorization` and `X-HF-Bill-To: wikimedia` headers.
+
+Add a model to `HF_DIRECT_INFERENCE_MODELS` (in addition to
+`HF_ALLOWED_MODELS`) if the router returns a "not found" / no-provider error
+for it — that's the signal it needs to go straight to the Inference API.
 
 ### Lift Wing Proxy (`/liftwing`)
 
