@@ -12,6 +12,15 @@ const HF_ALLOWED_MODELS = new Set([
   "openai/gpt-oss-20b",
   "Qwen/Qwen3-32B",
   "deepseek-ai/DeepSeek-V3.2-Exp",
+  "zai-org/GLM-5.2",
+]);
+// Most HF_ALLOWED_MODELS are served by multiple providers behind HuggingFace's
+// unified router (router.huggingface.co). Some models — e.g. GLM-5.2 — aren't
+// onboarded onto the router and only exist on HF's per-model serverless
+// Inference API, so those need a different upstream URL entirely (and no
+// ":provider" suffix, since there's no provider to pick).
+const HF_DIRECT_INFERENCE_MODELS = new Set([
+  "zai-org/GLM-5.2",
 ]);
 const HF_MAX_TOKENS = 16384;
 const HF_MAX_BODY_BYTES = 200 * 1024;
@@ -430,19 +439,28 @@ export default {
         body.max_tokens = HF_MAX_TOKENS;
       }
 
+      const useDirectInference = HF_DIRECT_INFERENCE_MODELS.has(baseModel);
+      const hfEndpoint = useDirectInference
+        ? `https://api-inference.huggingface.co/models/${baseModel}/v1/chat/completions`
+        : "https://router.huggingface.co/v1/chat/completions";
+      // The router uses the ":provider" suffix to pick a backend; the direct
+      // per-model endpoint has no such concept, so strip it and send the bare
+      // model id upstream.
+      const upstreamBody = useDirectInference ? { ...body, model: baseModel } : body;
+
       let upstream;
       try {
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), HF_UPSTREAM_TIMEOUT_MS);
         try {
-          upstream = await fetch("https://router.huggingface.co/v1/chat/completions", {
+          upstream = await fetch(hfEndpoint, {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
               "Authorization": `Bearer ${env.HF_TOKEN}`,
               "X-HF-Bill-To": "wikimedia",
             },
-            body: JSON.stringify(body),
+            body: JSON.stringify(upstreamBody),
             signal: controller.signal,
           });
         } finally {
