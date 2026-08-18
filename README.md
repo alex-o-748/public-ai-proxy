@@ -157,21 +157,6 @@ The `/hf` endpoint forwards OpenAI-compatible chat completion requests to `https
 
 Update the allowlist in `src/index.js` (`HF_ALLOWED_MODELS`) to enable additional models.
 
-#### Direct inference models
-
-Most allowlisted models are served by multiple providers behind HuggingFace's
-unified router. Some models — e.g. `zai-org/GLM-5.2` — aren't onboarded onto
-the router and only exist on HF's per-model serverless Inference API, so
-requests for them are sent to
-`https://api-inference.huggingface.co/models/<model>/v1/chat/completions`
-instead of `router.huggingface.co`, with the `:provider` suffix stripped
-(there's no provider to pick on that endpoint). Both endpoints get the same
-`Authorization` and `X-HF-Bill-To: wikimedia` headers.
-
-Add a model to `HF_DIRECT_INFERENCE_MODELS` (in addition to
-`HF_ALLOWED_MODELS`) if the router returns a "not found" / no-provider error
-for it — that's the signal it needs to go straight to the Inference API.
-
 ### Lift Wing Proxy (`/liftwing`)
 
 The `/liftwing` endpoint forwards OpenAI-compatible chat completion requests to Wikimedia's Lift Wing LLM service. Lift Wing routes by model name in the URL path, so the request is sent to `https://api.wikimedia.org/service/lw/inference/v1/models/<model>/openai/v1/chat/completions`.
