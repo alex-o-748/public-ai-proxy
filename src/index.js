@@ -1,7 +1,7 @@
 import { extractText as extractPdfText, getDocumentProxy } from "unpdf";
 
 // ===== Rate limit settings =====
-const RATE_LIMIT = 20;        // requests
+const RATE_LIMIT = 300;       // requests (temporarily raised for multi-user trial)
 const WINDOW_MS = 60_000;    // per minute
 
 // Best-effort per-IP buckets (free, in-memory)
