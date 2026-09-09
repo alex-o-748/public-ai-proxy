@@ -1,4 +1,5 @@
 import { extractText as extractPdfText, getDocumentProxy } from "unpdf";
+import robotsParser from "robots-parser";
 
 // ===== Rate limit settings =====
 const RATE_LIMIT = 20;        // requests
@@ -105,6 +106,55 @@ async function readJsonBody(request, cors) {
   } catch {
     return { errorResponse: jsonError(400, "Invalid JSON", cors) };
   }
+}
+
+// ===== robots.txt checking for /?fetch= =====
+// We identify ourselves honestly when requesting robots.txt so site owners
+// can see who's asking and scope rules to us specifically if they want to.
+const ROBOTS_USER_AGENT =
+  "PublicAIProxyBot (+https://github.com/alex-o-748/public-ai-proxy; Wikipedia citation verification)";
+const ROBOTS_FETCH_TIMEOUT_MS = 5000;
+const ROBOTS_CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+// Best-effort per-origin cache (free, in-memory) — avoids re-fetching
+// robots.txt on every citation check against the same site.
+const robotsCache = new Map();
+
+async function isAllowedByRobots(targetUrl) {
+  let origin;
+  try {
+    origin = new URL(targetUrl).origin;
+  } catch {
+    return true; // malformed URL — let the caller's own validation handle it
+  }
+
+  const now = Date.now();
+  let entry = robotsCache.get(origin);
+
+  if (!entry || now - entry.fetchedAt > ROBOTS_CACHE_TTL_MS) {
+    const robotsUrl = `${origin}/robots.txt`;
+    let contents = "";
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), ROBOTS_FETCH_TIMEOUT_MS);
+      try {
+        const resp = await fetch(robotsUrl, {
+          signal: controller.signal,
+          headers: { "User-Agent": ROBOTS_USER_AGENT },
+        });
+        if (resp.ok) contents = await resp.text();
+      } finally {
+        clearTimeout(timeout);
+      }
+    } catch {
+      // Missing/unreachable robots.txt is treated as "no restrictions".
+      contents = "";
+    }
+    entry = { robots: robotsParser(robotsUrl, contents), fetchedAt: now };
+    robotsCache.set(origin, entry);
+  }
+
+  // isAllowed() returns undefined when no rule applies — that also means allowed.
+  return entry.robots.isAllowed(targetUrl, ROBOTS_USER_AGENT) !== false;
 }
 
 // ===== Neon SQL-over-HTTP helper =====
@@ -299,6 +349,13 @@ export default {
       if (!targetUrl || !targetUrl.startsWith('http')) {
           return new Response(JSON.stringify({ error: 'Invalid URL' }), {
               status: 400,
+              headers: { ...corsHeaders, 'Content-Type': 'application/json' }
+          });
+      }
+
+      if (!(await isAllowedByRobots(targetUrl))) {
+          return new Response(JSON.stringify({ error: 'Disallowed by robots.txt' }), {
+              status: 403,
               headers: { ...corsHeaders, 'Content-Type': 'application/json' }
           });
       }

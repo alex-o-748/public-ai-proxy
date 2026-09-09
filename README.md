@@ -11,7 +11,7 @@ A Cloudflare Worker that proxies requests to the [PublicAI](https://publicai.co)
 - **CORS** — Configured for Wikipedia origins (`en.wikipedia.org`, `www.wikipedia.org`, `commons.wikimedia.org`)
 - **Verification Logging** — `/log` endpoint records citation verification results to a Neon PostgreSQL database
 - **Feedback** — `/feedback` endpoint records user ratings and verdict corrections to a Neon PostgreSQL database
-- **URL Fetching** — `?fetch=<url>` extracts text content from external pages (scripts, styles, nav stripped; 100k char limit)
+- **URL Fetching** — `?fetch=<url>` extracts text content from external pages (scripts, styles, nav stripped; 100k char limit), honoring `robots.txt` before fetching
 - **Debug Endpoints** — `?ping` for reachability checks, `?neon=test` for database connectivity
 
 ## Endpoints
@@ -23,7 +23,7 @@ A Cloudflare Worker that proxies requests to the [PublicAI](https://publicai.co)
 | `POST` | `/liftwing` | Proxies chat completions to Wikimedia Lift Wing (allowlisted Qwen models only) |
 | `POST` | `/log` | Logs a citation verification result to the database |
 | `POST` | `/feedback` | Logs a user rating or verdict correction for a check |
-| `GET` | `/?fetch=<url>` | Fetches and extracts text content from a URL |
+| `GET` | `/?fetch=<url>` | Fetches and extracts text content from a URL (respects `robots.txt`) |
 | `GET` | `/?ping` | Returns timestamp, IP, and CORS status |
 | `GET` | `/?neon=test` | Tests the Neon database connection |
 
