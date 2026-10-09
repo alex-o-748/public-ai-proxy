@@ -18,6 +18,10 @@ const HF_MAX_TOKENS = 16384;
 const HF_MAX_BODY_BYTES = 200 * 1024;
 const HF_UPSTREAM_TIMEOUT_MS = 60_000;
 
+// ===== Tavily relay settings =====
+const TAVILY_MAX_BODY_BYTES = 16 * 1024;
+const TAVILY_UPSTREAM_TIMEOUT_MS = 60_000;
+
 // ===== Lift Wing (Wikimedia) proxy settings =====
 // Wikimedia hosts open-weight Qwen models on their Lift Wing infrastructure,
 // served with vLLM behind an OpenAI-compatible chat completions API.
@@ -407,6 +411,53 @@ export default {
       });
     }
     // =========================
+
+    // ===== /tavily endpoint — relay to Tavily search =====
+    // Wikipedia's Content-Security-Policy blocks api.tavily.com from user
+    // scripts, so they reach it through here. The caller's own Tavily key
+    // (its Authorization header) is passed through; the Worker holds none.
+    if (url.pathname === '/tavily') {
+      const auth = request.headers.get("Authorization") || "";
+      if (!/^Bearer \S+$/.test(auth)) {
+        return jsonError(401, "Missing Tavily API key", cors);
+      }
+      const raw = await request.text();
+      if (raw.length > TAVILY_MAX_BODY_BYTES) {
+        return jsonError(413, "Request body too large", cors);
+      }
+      try {
+        JSON.parse(raw);
+      } catch {
+        return jsonError(400, "Invalid JSON", cors);
+      }
+
+      let upstream;
+      try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), TAVILY_UPSTREAM_TIMEOUT_MS);
+        try {
+          upstream = await fetch("https://api.tavily.com/search", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "Authorization": auth },
+            body: raw,
+            signal: controller.signal,
+          });
+        } finally {
+          clearTimeout(timer);
+        }
+      } catch (e) {
+        const status = e.name === 'AbortError' ? 504 : 502;
+        const msg = e.name === 'AbortError' ? "Upstream timeout" : "Upstream network error";
+        return jsonError(status, msg, cors);
+      }
+
+      // Errors pass through as Tavily sent them: a bad key or spent credits
+      // are the caller's to see and fix.
+      const headers = new Headers(cors);
+      const ct = upstream.headers.get("content-type");
+      if (ct) headers.set("content-type", ct);
+      return new Response(upstream.body, { status: upstream.status, headers });
+    }
 
     // ===== /hf endpoint — proxy to HuggingFace Inference Providers =====
     if (url.pathname === '/hf') {

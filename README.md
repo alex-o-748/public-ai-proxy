@@ -157,6 +157,15 @@ The `/hf` endpoint forwards OpenAI-compatible chat completion requests to `https
 
 Update the allowlist in `src/index.js` (`HF_ALLOWED_MODELS`) to enable additional models.
 
+### Tavily Relay (`/tavily`)
+
+The `/tavily` endpoint forwards a search request body to `https://api.tavily.com/search`. Wikipedia's Content-Security-Policy blocks `api.tavily.com` from user scripts (CNfirmed's Tavily + GPT-OSS provider calls it), so they reach it through here.
+
+- **Caller's key** — the request's `Authorization: Bearer <tavily key>` header is passed through unchanged; the Worker holds no Tavily key, and a request without one returns `401`.
+- **Body limit** — requests larger than 16 KB return `413`; non-JSON bodies return `400`.
+- **Upstream timeout** — 60 s; aborted requests return `504`.
+- **Errors** — Tavily's own status and body are passed through, so a bad key or spent credits reach the caller as Tavily reported them.
+
 ### Lift Wing Proxy (`/liftwing`)
 
 The `/liftwing` endpoint forwards OpenAI-compatible chat completion requests to Wikimedia's Lift Wing LLM service. Lift Wing routes by model name in the URL path, so the request is sent to `https://api.wikimedia.org/service/lw/inference/v1/models/<model>/openai/v1/chat/completions`.
