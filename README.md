@@ -20,6 +20,8 @@ A Cloudflare Worker that proxies requests to the [PublicAI](https://publicai.co)
 |--------|-------------|-------------|
 | `POST` | `/` | Proxies request body to PublicAI chat completions |
 | `POST` | `/hf` | Proxies chat completions to HuggingFace Inference Providers (allowlisted models only) |
+| `POST` | `/tavily` | Relays a Tavily search, with the caller's key or the Worker's free credits |
+| `GET` | `/tavily` | Whether free (shared-key) Tavily searches are available |
 | `POST` | `/liftwing` | Proxies chat completions to Wikimedia Lift Wing (allowlisted Qwen models only) |
 | `POST` | `/log` | Logs a citation verification result to the database |
 | `POST` | `/feedback` | Logs a user rating or verdict correction for a check |
@@ -47,7 +49,12 @@ wrangler secret put publicai        # PublicAI API bearer token
 wrangler secret put HF_TOKEN        # HuggingFace Inference Providers token (for /hf)
 wrangler secret put DATABASE_URL    # Neon PostgreSQL connection string
 wrangler secret put LIFTWING_TOKEN  # (optional) Lift Wing approved-bot JWT (for /liftwing)
+wrangler secret put TAVILY_API_KEY  # (optional) Tavily key that pays for free searches (for /tavily)
 ```
+
+`TAVILY_API_KEY` is optional: without it, `/tavily` only relays requests that
+bring their own key. Keep it here and nowhere else: the user script is a public
+wiki page, so a key in it is a key for anyone.
 
 `LIFTWING_TOKEN` is optional: the Lift Wing public API works anonymously, but
 anonymous traffic shares a coarse rate limit. Once the Wikimedia ML team grants
@@ -161,10 +168,12 @@ Update the allowlist in `src/index.js` (`HF_ALLOWED_MODELS`) to enable additiona
 
 The `/tavily` endpoint forwards a search request body to `https://api.tavily.com/search`. Wikipedia's Content-Security-Policy blocks `api.tavily.com` from user scripts (CNfirmed's Tavily + GPT-OSS provider calls it), so they reach it through here.
 
-- **Caller's key** — the request's `Authorization: Bearer <tavily key>` header is passed through unchanged; the Worker holds no Tavily key, and a request without one returns `401`.
+- **Caller's key** — a request with `Authorization: Bearer <tavily key>` is passed through unchanged, and Tavily's own status and body come back as Tavily sent them, so a bad key or spent credits reach the caller as Tavily reported them.
+- **Free searches** — a request with no `Authorization` header searches on the Worker's `TAVILY_API_KEY`, while its credits last. Only for requests from Wikipedia/Wikimedia origins (`403` otherwise), at most 50 an hour per IP (`429`), at most `advanced` depth and 10 results (the body is clamped; `auto_parameters` is dropped). Tavily's errors are not passed through, since they could name the key's account.
+- **Out of free credits** — `402` with `{"error": {"code": "free_credits_exhausted", ...}}` when the secret is not set, its credits are spent (Tavily's `432`/`433`) or it is refused (`401`). The user script shows this as "add your own key".
+- **`GET /tavily`** — `{"shared": true|false, "remaining": <credits>|null}`: whether a free search would go ahead now. Read from Tavily's `/usage`, cached for 5 minutes and counted down per search in between (an advanced search costs 2 credits, a basic one 1). `remaining` is `null` when `/usage` could not be read; searches then go ahead and Tavily's refusal stops them.
 - **Body limit** — requests larger than 16 KB return `413`; non-JSON bodies return `400`.
 - **Upstream timeout** — 60 s; aborted requests return `504`.
-- **Errors** — Tavily's own status and body are passed through, so a bad key or spent credits reach the caller as Tavily reported them.
 
 ### Lift Wing Proxy (`/liftwing`)
 
