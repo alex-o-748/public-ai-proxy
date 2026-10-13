@@ -12,6 +12,7 @@ A Cloudflare Worker that proxies requests to the [PublicAI](https://publicai.co)
 - **Verification Logging** — `/log` endpoint records citation verification results to a Neon PostgreSQL database
 - **Feedback** — `/feedback` endpoint records user ratings and verdict corrections to a Neon PostgreSQL database
 - **URL Fetching** — `?fetch=<url>` extracts text content from external pages (scripts, styles, nav stripped; 100k char limit)
+- **Search Inside a Book** — `/archive/inside` searches one Internet Archive book page by page, as archive.org's book reader does: every paragraph holding a term, with its page number
 - **Debug Endpoints** — `?ping` for reachability checks, `?neon=test` for database connectivity
 
 ## Endpoints
@@ -23,6 +24,7 @@ A Cloudflare Worker that proxies requests to the [PublicAI](https://publicai.co)
 | `POST` | `/tavily` | Relays a Tavily search, with the caller's key or the Worker's free credits |
 | `GET` | `/tavily` | Whether free (shared-key) Tavily searches are available |
 | `POST` | `/liftwing` | Proxies chat completions to Wikimedia Lift Wing (allowlisted Qwen models only) |
+| `GET` | `/archive/inside` | Searches inside one Internet Archive book: the paragraphs holding each term, with their page |
 | `POST` | `/log` | Logs a citation verification result to the database |
 | `POST` | `/feedback` | Logs a user rating or verdict correction for a check |
 | `GET` | `/?fetch=<url>` | Fetches and extracts text content from a URL |
@@ -175,6 +177,16 @@ The `/tavily` endpoint forwards a search request body to `https://api.tavily.com
 - **Body limit** — requests larger than 16 KB return `413`; non-JSON bodies return `400`.
 - **Upstream timeout** — 60 s; aborted requests return `504`.
 
+### Search Inside a Book (`/archive/inside`)
+
+`GET /archive/inside?id=<identifier>&doc=<book>&q=<term>[&q=<term>…]` runs the search archive.org's book reader runs (`/fulltext/inside.php`) over one book: every paragraph that holds a term, with the scanned leaf it is on and its printed page number. It is served by the item's numbered server (`ia8xxxxx.us.archive.org`), which Wikipedia's Content-Security-Policy refuses, so CNfirmed's Internet Archive stage reaches it through here.
+
+- **Request** — `id` is the item's identifier. `doc` names the book inside the item, as its OCR files are named without `_djvu.txt` (the full-text search's `file_basename`; it may be a path, `2004/Issue 10`); without it, the item's one book is searched, and an item holding several answers `400` with code `bundle`. One to three `q` terms of up to 100 characters, each searched on its own: a term in double quotes is a phrase. No stemming, no wildcards.
+- **Response** — `{"id", "doc", "q": [...], "counts": [n, …], "pageConfidence", "matches": [{"text", "terms": [0, 2], "leaf", "page", "leafEnd"?, "pageEnd"?}]}`. Each paragraph comes once, with the terms it holds, the most terms first and then in the book's order; at most 40 paragraphs, each cut to 1,500 characters around its hits. `counts` is each term's matches in the book (`null` when its search failed). `page` is the printed page number from the book's `_page_numbers.json`, as the Archive's reader shows it (`null` when it has none), with the file's overall `pageConfidence`; `leafEnd`/`pageEnd` when the paragraph runs onto the next page. `https://archive.org/details/<id>/page/leaf<leaf>` opens the reader on that leaf.
+- **Open books only** — without an archive.org login, inside.php refuses a book in the lending library: `403` with code `restricted`. `404` (`not_found`, `no_text`) for an unknown item or one with no searchable text; `502`/`504` when every term's search failed.
+- **Upstream** — the item's `server` and `dir` from the metadata API's sub-paths (a whole record runs to megabytes for an item holding hundreds of books), one inside.php request per term, side by side (30 s each), then the page numbers when anything matched.
+- **Limits** — 60 requests a minute per IP (`429` with `Retry-After`). Successful answers carry `Cache-Control: public, max-age=86400`.
+
 ### Lift Wing Proxy (`/liftwing`)
 
 The `/liftwing` endpoint forwards OpenAI-compatible chat completion requests to Wikimedia's Lift Wing LLM service. Lift Wing routes by model name in the URL path, so the request is sent to `https://api.wikimedia.org/service/lw/inference/v1/models/<model>/openai/v1/chat/completions`.
@@ -216,6 +228,7 @@ the client adds new `kind` or verdict values.
 
 ```sh
 wrangler dev        # Start local dev server
+npm test            # Unit tests (node --test), upstreams stubbed
 ```
 
 ## Deployment

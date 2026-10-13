@@ -51,6 +51,40 @@ const LIFTWING_BASE = "https://api.wikimedia.org/service/lw/inference/v1/models"
 const LIFTWING_USER_AGENT =
   "public-ai-proxy (https://github.com/alex-o-748/public-ai-proxy; Wikipedia citation verification)";
 
+// ===== Internet Archive: search inside a book =====
+// The search archive.org's book reader runs: every paragraph of one book that
+// holds a term, with the scanned leaf it is on. It is served by the item's
+// numbered server (ia8xxxxx.us.archive.org), which Wikipedia's
+// Content-Security-Policy refuses, so the user script reaches it through
+// here. Open books only: without an archive.org login, inside.php answers 403
+// for a book in the lending library.
+const ARCHIVE_METADATA_URL = "https://archive.org/metadata/";
+const ARCHIVE_USER_AGENT =
+  "public-ai-proxy (https://github.com/alex-o-748/public-ai-proxy; CNfirmed: search inside a book)";
+const ARCHIVE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$/;
+const ARCHIVE_SERVER = /^[a-z0-9-]+\.us\.archive\.org$/;
+const ARCHIVE_DIR = /^\/[A-Za-z0-9._/-]+$/;
+const INSIDE_PER_IP = 60;               // requests
+const INSIDE_WINDOW_MS = 60_000;        // per minute
+const INSIDE_MAX_TERMS = 3;
+const INSIDE_MAX_TERM_CHARS = 100;
+const INSIDE_MAX_DOC_CHARS = 512;
+const INSIDE_MAX_MATCHES = 40;          // paragraphs returned, most terms first
+const INSIDE_MAX_TEXT_CHARS = 1500;     // of a paragraph, around its hits
+// A common word in a long book is megabytes of matches; such a term is
+// reported as failed rather than read.
+const INSIDE_MAX_UPSTREAM_CHARS = 4_000_000;
+const INSIDE_METADATA_TIMEOUT_MS = 15_000;
+const INSIDE_SEARCH_TIMEOUT_MS = 30_000;
+const INSIDE_PRE = "{{{";
+const INSIDE_POST = "}}}";
+// A book's OCR files. Their name before the suffix is the book's `doc`: the
+// item's identifier, or for an item holding several books, each book's own.
+const BOOK_TEXT_SUFFIXES = ["_djvu.txt", "_djvu.xml", "_hocr_searchtext.txt.gz"];
+// inside.php's answer when it has no word positions for that `doc`.
+const NO_LAYOUT = /no hocr or abbyy/i;
+const insideBuckets = new Map();
+
 // Qwen3 models are reasoning models: they may prepend their chain-of-thought
 // wrapped in <think>…</think> before the actual answer, which breaks a naive
 // JSON.parse of the message content. Strip those blocks from the final text.
@@ -131,6 +165,280 @@ function noFreeCredits(message, cors) {
     JSON.stringify({ error: { code: "free_credits_exhausted", message } }),
     { status: 402, headers: { ...cors, "Content-Type": "application/json" } },
   );
+}
+
+// ===== /archive/inside: search inside one book =====
+function archiveError(status, code, message, cors, maxAgeS) {
+  const headers = { ...cors, "Content-Type": "application/json" };
+  if (maxAgeS) headers["Cache-Control"] = `public, max-age=${maxAgeS}`;
+  return new Response(JSON.stringify({ error: { code, message } }), { status, headers });
+}
+
+// Seconds to wait when over the limit, or 0.
+function overLimit(buckets, ip, limit, windowMs) {
+  const now = Date.now();
+  let b = buckets.get(ip);
+  if (!b || now - b.start > windowMs) b = { count: 0, start: now };
+  b.count++;
+  buckets.set(ip, b);
+  return b.count > limit ? Math.max(1, Math.ceil((b.start + windowMs - now) / 1000)) : 0;
+}
+
+// One field of an item's metadata, read through the API's sub-paths
+// (`/metadata/{id}/server`), since a whole record runs to megabytes for an
+// item holding hundreds of books. Undefined when the item has no such field
+// or does not exist; throws when the API cannot be read.
+async function archiveMetadataField(id, field) {
+  const res = await fetch(`${ARCHIVE_METADATA_URL}${encodeURIComponent(id)}/${field}`, {
+    headers: { "User-Agent": ARCHIVE_USER_AGENT, "Accept": "application/json" },
+    signal: AbortSignal.timeout(INSIDE_METADATA_TIMEOUT_MS),
+  });
+  if (!res.ok) throw new Error(`metadata HTTP ${res.status}`);
+  const text = await res.text();
+  if (text.length > INSIDE_MAX_UPSTREAM_CHARS) throw new Error("metadata too large");
+  const data = JSON.parse(text);
+  return data && typeof data === "object" && "result" in data ? data.result : undefined;
+}
+
+// The books an item's files hold, by their `doc` name.
+function bookDocs(files) {
+  const out = new Set();
+  for (const f of Array.isArray(files) ? files : []) {
+    const name = f && typeof f.name === "string" ? f.name : "";
+    for (const s of BOOK_TEXT_SUFFIXES) if (name.endsWith(s)) out.add(name.slice(0, -s.length));
+  }
+  return [...out];
+}
+
+// A book's name is a path inside the item ("2004/Issue 10 (2004-10)"), and
+// may begin with a space: kept as given, but never leaving the item.
+function validDoc(doc) {
+  return doc.length > 0 && doc.length <= INSIDE_MAX_DOC_CHARS && !/[\u0000-\u001f]/.test(doc) &&
+    !doc.startsWith("/") && !doc.split("/").some((part) => part === "." || part === "..");
+}
+
+// The book reader's own request. inside.php does not read an encoded slash,
+// so the item's path and the book's name keep theirs, as the reader sends them.
+function insideUrl(server, id, doc, dir, term) {
+  const params = new URLSearchParams({
+    item_id: id, doc, path: dir, q: term, pre_tag: INSIDE_PRE, post_tag: INSIDE_POST,
+  });
+  return `https://${server}/fulltext/inside.php?${params.toString().replace(/%2F/g, "/")}`;
+}
+
+function pageNumbersUrl(server, dir, doc) {
+  return `https://${server}${dir}/${doc.split("/").map(encodeURIComponent).join("/")}_page_numbers.json`;
+}
+
+// One term searched inside the book: its matches, or why there are none.
+async function searchInsideTerm(server, id, doc, dir, term) {
+  let res;
+  try {
+    res = await fetch(insideUrl(server, id, doc, dir, term), {
+      headers: { "User-Agent": ARCHIVE_USER_AGENT, "Accept": "application/json" },
+      signal: AbortSignal.timeout(INSIDE_SEARCH_TIMEOUT_MS),
+    });
+  } catch (e) {
+    return { error: e.name === "TimeoutError" || e.name === "AbortError" ? "timeout" : "network error" };
+  }
+  if (res.status === 403) return { restricted: true };
+  if (!res.ok) return { error: `HTTP ${res.status}` };
+  const text = await res.text();
+  if (text.length > INSIDE_MAX_UPSTREAM_CHARS) return { error: "too many matches" };
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    return { error: "unreadable reply" };
+  }
+  const matches = data && Array.isArray(data.matches) ? data.matches : [];
+  if (!matches.length && data && data.error) {
+    return NO_LAYOUT.test(String(data.error)) ? { noLayout: true } : { error: String(data.error).slice(0, 200) };
+  }
+  return { matches };
+}
+
+// The book's printed page numbers by leaf, from the `_page_numbers.json` the
+// Archive works out from the scans (what its reader shows), with its overall
+// confidence. Null when the book has none.
+async function pageNumbers(server, dir, doc) {
+  try {
+    const res = await fetch(pageNumbersUrl(server, dir, doc), {
+      headers: { "User-Agent": ARCHIVE_USER_AGENT, "Accept": "application/json" },
+      signal: AbortSignal.timeout(INSIDE_METADATA_TIMEOUT_MS),
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const byLeaf = new Map();
+    for (const p of Array.isArray(data && data.pages) ? data.pages : []) {
+      const page = p && typeof p.pageNumber === "string" ? p.pageNumber.trim() : "";
+      if (Number.isInteger(p && p.leafNum) && page) byLeaf.set(p.leafNum, page);
+    }
+    return { byLeaf, confidence: typeof data.confidence === "number" ? data.confidence : null };
+  } catch {
+    return null;
+  }
+}
+
+// A paragraph without its hit markers, and where each hit begins in it.
+function unmark(text) {
+  const t = String(text ?? "").replace(/\s+/g, " ").trim();
+  let plain = "";
+  const hits = [];
+  for (let i = 0; i < t.length;) {
+    if (t.startsWith(INSIDE_PRE, i)) {
+      hits.push(plain.length);
+      i += INSIDE_PRE.length;
+    } else if (t.startsWith(INSIDE_POST, i)) {
+      i += INSIDE_POST.length;
+    } else {
+      plain += t[i++];
+    }
+  }
+  return { plain, hits };
+}
+
+// At most `max` characters of a paragraph: the stretch holding the most hits,
+// cut at spaces, "…" where it was cut.
+function windowAround(plain, hits, max) {
+  if (plain.length <= max) return plain;
+  let start = 0;
+  let best = -1;
+  for (const h of hits.length ? hits : [0]) {
+    const s = Math.max(0, Math.min(h - Math.floor(max / 4), plain.length - max));
+    const n = hits.filter((x) => x >= s && x < s + max).length;
+    if (n > best) {
+      best = n;
+      start = s;
+    }
+  }
+  let w = plain.slice(start, start + max);
+  if (start > 0) w = `…${w.replace(/^\S*\s/, "")}`;
+  if (start + max < plain.length) w = `${w.replace(/\s\S*$/, "")}…`;
+  return w;
+}
+
+// Every term's matches as one list of paragraphs, each once with the terms it
+// holds: the most terms first, then in the book's order. A paragraph that
+// runs onto the next page says so (leafEnd).
+function mergeMatches(perTerm, byLeaf) {
+  const leafOf = (p) => (p && Number.isInteger(p.page) ? p.page : null);
+  const seen = new Map();
+  perTerm.forEach((r, term) => {
+    for (const m of r.matches || []) {
+      const par = Array.isArray(m && m.par) ? m.par : [];
+      const leaf = leafOf(par[0]);
+      const { plain, hits } = unmark(m && m.text);
+      if (!plain) continue;
+      const key = `${leaf}\u0000${plain}`;
+      let e = seen.get(key);
+      if (!e) {
+        e = { plain, hits: [], terms: [], leaf, leafEnd: leafOf(par[par.length - 1]) };
+        seen.set(key, e);
+      }
+      if (!e.terms.includes(term)) e.terms.push(term);
+      for (const h of hits) if (!e.hits.includes(h)) e.hits.push(h);
+    }
+  });
+  const page = (leaf) => (byLeaf && leaf !== null && byLeaf.get(leaf)) || null;
+  return [...seen.values()]
+    .sort((a, b) => b.terms.length - a.terms.length || (a.leaf ?? 0) - (b.leaf ?? 0))
+    .slice(0, INSIDE_MAX_MATCHES)
+    .map((e) => {
+      const out = {
+        text: windowAround(e.plain, e.hits.sort((x, y) => x - y), INSIDE_MAX_TEXT_CHARS),
+        terms: e.terms.sort((x, y) => x - y),
+        leaf: e.leaf,
+        page: page(e.leaf),
+      };
+      if (e.leafEnd !== null && e.leafEnd !== e.leaf) {
+        out.leafEnd = e.leafEnd;
+        out.pageEnd = page(e.leafEnd);
+      }
+      return out;
+    });
+}
+
+// GET /archive/inside?id=<identifier>&doc=<book>&q=<term>[&q=<term>…]
+async function archiveInside(url, ip, cors) {
+  const wait = overLimit(insideBuckets, ip, INSIDE_PER_IP, INSIDE_WINDOW_MS);
+  if (wait) {
+    return new Response(JSON.stringify({ error: { code: "rate_limited", message: "Too many searches; try again shortly" } }), {
+      status: 429,
+      headers: { ...cors, "Content-Type": "application/json", "Retry-After": String(wait) },
+    });
+  }
+  const id = url.searchParams.get("id") || "";
+  if (!ARCHIVE_ID.test(id)) return archiveError(400, "bad_request", "id: an Internet Archive identifier", cors);
+  const docParam = url.searchParams.get("doc");
+  if (docParam !== null && !validDoc(docParam)) return archiveError(400, "bad_request", "doc: a book in the item", cors);
+  // The reader takes a slash out of a term too: it would end the path.
+  const terms = [...new Set(url.searchParams.getAll("q")
+    .map((q) => q.replace(/\//g, " ").replace(/\s+/g, " ").trim())
+    .filter(Boolean))];
+  if (!terms.length || terms.length > INSIDE_MAX_TERMS ||
+      terms.some((t) => t.length > INSIDE_MAX_TERM_CHARS || /[\u0000-\u001f]/.test(t))) {
+    return archiveError(400, "bad_request", `q: one to ${INSIDE_MAX_TERMS} terms of up to ${INSIDE_MAX_TERM_CHARS} characters`, cors);
+  }
+
+  let server;
+  let dir;
+  try {
+    [server, dir] = await Promise.all([archiveMetadataField(id, "server"), archiveMetadataField(id, "dir")]);
+  } catch {
+    return archiveError(502, "upstream_error", "Could not read the item's metadata", cors);
+  }
+  if (typeof server !== "string" || typeof dir !== "string") {
+    return archiveError(404, "not_found", "No such item on the Internet Archive", cors, 3600);
+  }
+  if (!ARCHIVE_SERVER.test(server) || !ARCHIVE_DIR.test(dir) || dir.split("/").includes("..")) {
+    return archiveError(502, "upstream_error", "Unexpected item location", cors);
+  }
+
+  let doc = docParam ?? id;
+  const searchAll = (d) => Promise.all(terms.map((t) => searchInsideTerm(server, id, d, dir, t)));
+  let results = await searchAll(doc);
+  // Asked for no book in particular, the item's one book may not be named
+  // after the item ("History of Civilizations of Central Asia, Volume 2").
+  if (docParam === null && results.every((r) => r.noLayout)) {
+    let books = null;
+    try {
+      books = bookDocs(await archiveMetadataField(id, "files"));
+    } catch {
+      books = null;
+    }
+    if (books && books.length > 1) {
+      return archiveError(400, "bundle", `This item holds ${books.length} books: name one in doc`, cors, 3600);
+    }
+    if (books && books.length === 1 && books[0] !== doc) {
+      doc = books[0];
+      results = await searchAll(doc);
+    }
+  }
+  if (results.some((r) => r.restricted)) {
+    return archiveError(403, "restricted", "Only open books can be searched inside: this one is lent, or restricted", cors, 3600);
+  }
+  if (results.every((r) => r.noLayout)) {
+    return archiveError(404, "no_text", "The Archive has no searchable text for this book", cors, 3600);
+  }
+  if (results.every((r) => !r.matches)) {
+    const timedOut = results.some((r) => r.error === "timeout");
+    return archiveError(timedOut ? 504 : 502, "upstream_error", `Search inside failed: ${results.map((r) => r.error || "no text").join("; ")}`, cors);
+  }
+
+  const pages = results.some((r) => r.matches && r.matches.length) ? await pageNumbers(server, dir, doc) : null;
+  const body = {
+    id,
+    doc,
+    q: terms,
+    // Matches per term; null for a term whose search failed.
+    counts: results.map((r) => (r.matches ? r.matches.length : null)),
+    pageConfidence: pages ? pages.confidence : null,
+    matches: mergeMatches(results, pages && pages.byLeaf),
+  };
+  return new Response(JSON.stringify(body), {
+    headers: { ...cors, "Content-Type": "application/json", "Cache-Control": "public, max-age=86400" },
+  });
 }
 
 // ===== /log and /feedback payload sanitization =====
@@ -383,6 +691,11 @@ export default {
         shared: remaining === null || remaining >= 2,
         remaining,
       }), { headers: { ...cors, "Content-Type": "application/json" } });
+    }
+
+    // ===== GET /archive/inside — search inside one Internet Archive book =====
+    if (url.pathname === '/archive/inside' && request.method === 'GET') {
+      return archiveInside(url, request.headers.get("CF-Connecting-IP") || "unknown", cors);
     }
 
     // NEW: Handle URL fetch requests
