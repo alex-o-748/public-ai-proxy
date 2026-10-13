@@ -22,6 +22,18 @@ const HF_UPSTREAM_TIMEOUT_MS = 60_000;
 const TAVILY_MAX_BODY_BYTES = 16 * 1024;
 const TAVILY_UPSTREAM_TIMEOUT_MS = 60_000;
 
+// The Worker's own key (the TAVILY_API_KEY secret) pays for callers who send
+// none, while its credits last. It never leaves the Worker: a key in the user
+// script would be on a public wiki page for anyone to take.
+const TAVILY_SHARED_MAX_RESULTS = 10;
+const TAVILY_SHARED_PER_IP = 30;              // searches on the shared key
+const TAVILY_SHARED_WINDOW_MS = 60 * 60_000;  // per hour
+const TAVILY_USAGE_TTL_MS = 5 * 60_000;       // how long a /usage reading is trusted
+// Tavily's codes for a key over its plan's or its pay-as-you-go limit.
+const TAVILY_OUT_OF_CREDITS = new Set([432, 433]);
+const tavilySharedBuckets = new Map();
+let tavilyUsage = null; // { at, remaining } — remaining is null when unknown
+
 // ===== Lift Wing (Wikimedia) proxy settings =====
 // Wikimedia hosts open-weight Qwen models on their Lift Wing infrastructure,
 // served with vLLM behind an OpenAI-compatible chat completions API.
@@ -49,6 +61,76 @@ function stripThinkTags(text) {
 function jsonError(status, message, cors, extraHeaders) {
   const headers = { ...cors, "Content-Type": "application/json", ...(extraHeaders || {}) };
   return new Response(JSON.stringify({ error: { message } }), { status, headers });
+}
+
+// ===== Tavily shared credits =====
+// An advanced search costs 2 credits, a basic one 1.
+function tavilyCost(body) {
+  return body.search_depth === "basic" ? 1 : 2;
+}
+
+// Credits the shared key has left, from Tavily's /usage: the smallest of the
+// key's own limit and the account's plan (plus pay-as-you-go) allowance.
+function tavilyCreditsLeft(usage) {
+  const key = usage && usage.key;
+  const account = usage && usage.account;
+  const left = [];
+  if (key && typeof key.limit === "number") left.push(key.limit - (key.usage || 0));
+  if (account && typeof account.plan_limit === "number") {
+    let plan = account.plan_limit - (account.plan_usage || 0);
+    if (typeof account.paygo_limit === "number") {
+      plan += Math.max(0, account.paygo_limit - (account.paygo_usage || 0));
+    }
+    left.push(plan);
+  }
+  return left.length ? Math.max(0, Math.min(...left)) : null;
+}
+
+// Cached for a few minutes, and counted down locally between readings, so a
+// search does not cost a /usage call. A reading that fails is null: searches
+// go ahead, and Tavily's own refusal (432/433) is what stops them.
+async function tavilySharedRemaining(env) {
+  if (!env.TAVILY_API_KEY) return 0;
+  const now = Date.now();
+  if (tavilyUsage && now - tavilyUsage.at < TAVILY_USAGE_TTL_MS) return tavilyUsage.remaining;
+  let remaining = null;
+  try {
+    const res = await fetch("https://api.tavily.com/usage", {
+      headers: { "Authorization": `Bearer ${env.TAVILY_API_KEY}` },
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (res.ok) remaining = tavilyCreditsLeft(await res.json());
+  } catch {
+    // Unknown; see above.
+  }
+  tavilyUsage = { at: now, remaining };
+  return remaining;
+}
+
+function tavilySpend(credits) {
+  if (tavilyUsage && tavilyUsage.remaining !== null) {
+    tavilyUsage.remaining = Math.max(0, tavilyUsage.remaining - credits);
+  }
+}
+
+// What the shared key will pay for: a search, at most advanced depth, with
+// a bounded number of results. Callers with their own key send what they like.
+function tavilySharedBody(body) {
+  const out = { ...body };
+  out.search_depth = body.search_depth === "basic" ? "basic" : "advanced";
+  delete out.auto_parameters; // may pick a dearer depth on its own
+  const n = Number(body.max_results);
+  out.max_results = Number.isFinite(n) ? Math.min(Math.max(1, Math.floor(n)), TAVILY_SHARED_MAX_RESULTS) : 5;
+  return out;
+}
+
+// The user script tells this apart from other errors (code
+// "free_credits_exhausted") to ask for the user's own key.
+function noFreeCredits(message, cors) {
+  return new Response(
+    JSON.stringify({ error: { code: "free_credits_exhausted", message } }),
+    { status: 402, headers: { ...cors, "Content-Type": "application/json" } },
+  );
 }
 
 // ===== /log and /feedback payload sanitization =====
@@ -294,6 +376,15 @@ export default {
       return new Response('ok', { headers: feedbackCors });
     }
 
+    // ===== GET /tavily — are free (shared-key) searches available? =====
+    if (url.pathname === '/tavily' && request.method === 'GET') {
+      const remaining = await tavilySharedRemaining(env);
+      return new Response(JSON.stringify({
+        shared: remaining === null || remaining >= 2,
+        remaining,
+      }), { headers: { ...cors, "Content-Type": "application/json" } });
+    }
+
     // NEW: Handle URL fetch requests
     if (request.method === 'GET' && url.searchParams.has('fetch')) {
       const targetUrl = url.searchParams.get('fetch');
@@ -414,21 +505,50 @@ export default {
 
     // ===== /tavily endpoint — relay to Tavily search =====
     // Wikipedia's Content-Security-Policy blocks api.tavily.com from user
-    // scripts, so they reach it through here. The caller's own Tavily key
-    // (its Authorization header) is passed through; the Worker holds none.
+    // scripts, so they reach it through here. A caller's own Tavily key (its
+    // Authorization header) is passed through; a caller without one searches
+    // on the Worker's key (TAVILY_API_KEY) while its credits last.
     if (url.pathname === '/tavily') {
-      const auth = request.headers.get("Authorization") || "";
-      if (!/^Bearer \S+$/.test(auth)) {
-        return jsonError(401, "Missing Tavily API key", cors);
+      const callerAuth = request.headers.get("Authorization") || "";
+      if (callerAuth && !/^Bearer \S+$/.test(callerAuth)) {
+        return jsonError(401, "Malformed Tavily API key", cors);
       }
+      const shared = !callerAuth;
       const raw = await request.text();
       if (raw.length > TAVILY_MAX_BODY_BYTES) {
         return jsonError(413, "Request body too large", cors);
       }
+      let body;
       try {
-        JSON.parse(raw);
+        body = JSON.parse(raw);
       } catch {
         return jsonError(400, "Invalid JSON", cors);
+      }
+      if (!body || typeof body !== "object" || Array.isArray(body)) {
+        return jsonError(400, "Invalid JSON", cors);
+      }
+
+      let auth = callerAuth;
+      let sendBody = raw;
+      if (shared) {
+        // Only the user script, on Wikipedia, gets the shared key.
+        if (!isAllowedOrigin) {
+          return jsonError(403, "Free searches are for the CNfirmed user script on Wikipedia", cors);
+        }
+        const remaining = await tavilySharedRemaining(env);
+        if (!env.TAVILY_API_KEY || (remaining !== null && remaining < tavilyCost(body))) {
+          return noFreeCredits("No free web searches left", cors);
+        }
+        let b = tavilySharedBuckets.get(ip);
+        if (!b || now - b.start > TAVILY_SHARED_WINDOW_MS) b = { count: 0, start: now };
+        b.count++;
+        tavilySharedBuckets.set(ip, b);
+        if (b.count > TAVILY_SHARED_PER_IP) {
+          return jsonError(429, "Too many free searches this hour; try again later or add your own Tavily key", cors);
+        }
+        body = tavilySharedBody(body);
+        sendBody = JSON.stringify(body);
+        auth = `Bearer ${env.TAVILY_API_KEY}`;
       }
 
       let upstream;
@@ -439,7 +559,7 @@ export default {
           upstream = await fetch("https://api.tavily.com/search", {
             method: "POST",
             headers: { "Content-Type": "application/json", "Authorization": auth },
-            body: raw,
+            body: sendBody,
             signal: controller.signal,
           });
         } finally {
@@ -451,8 +571,22 @@ export default {
         return jsonError(status, msg, cors);
       }
 
-      // Errors pass through as Tavily sent them: a bad key or spent credits
-      // are the caller's to see and fix.
+      if (shared) {
+        if (TAVILY_OUT_OF_CREDITS.has(upstream.status) || upstream.status === 401) {
+          // Spent, or the key was revoked: no free searches until the
+          // next /usage reading says otherwise.
+          tavilyUsage = { at: Date.now(), remaining: 0 };
+          return noFreeCredits("No free web searches left", cors);
+        }
+        if (upstream.ok) tavilySpend(tavilyCost(body));
+        else if (upstream.status >= 400 && upstream.status < 500) {
+          // Tavily's message could name the shared key's account; keep it.
+          return jsonError(upstream.status, `Tavily refused the search (${upstream.status})`, cors);
+        }
+      }
+
+      // With the caller's own key, errors pass through as Tavily sent them:
+      // a bad key or spent credits are the caller's to see and fix.
       const headers = new Headers(cors);
       const ct = upstream.headers.get("content-type");
       if (ct) headers.set("content-type", ct);
