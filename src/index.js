@@ -26,7 +26,7 @@ const TAVILY_UPSTREAM_TIMEOUT_MS = 60_000;
 // none, while its credits last. It never leaves the Worker: a key in the user
 // script would be on a public wiki page for anyone to take.
 const TAVILY_SHARED_MAX_RESULTS = 10;
-const TAVILY_SHARED_PER_IP = 30;              // searches on the shared key
+const TAVILY_SHARED_PER_IP = 50;              // searches on the shared key
 const TAVILY_SHARED_WINDOW_MS = 60 * 60_000;  // per hour
 const TAVILY_USAGE_TTL_MS = 5 * 60_000;       // how long a /usage reading is trusted
 // Tavily's codes for a key over its plan's or its pay-as-you-go limit.
