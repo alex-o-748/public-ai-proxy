@@ -280,22 +280,20 @@ async function pageNumbers(server, dir, doc) {
   }
 }
 
-// A paragraph without its hit markers, and where each hit begins in it.
+// A paragraph without its hit markers ({{{…}}}, INSIDE_PRE and INSIDE_POST),
+// and where each hit begins in it.
 function unmark(text) {
   const t = String(text ?? "").replace(/\s+/g, " ").trim();
+  const marker = /\{\{\{|\}\}\}/g;
   let plain = "";
   const hits = [];
-  for (let i = 0; i < t.length;) {
-    if (t.startsWith(INSIDE_PRE, i)) {
-      hits.push(plain.length);
-      i += INSIDE_PRE.length;
-    } else if (t.startsWith(INSIDE_POST, i)) {
-      i += INSIDE_POST.length;
-    } else {
-      plain += t[i++];
-    }
+  let from = 0;
+  for (let m = marker.exec(t); m; m = marker.exec(t)) {
+    plain += t.slice(from, m.index);
+    if (m[0] === INSIDE_PRE) hits.push(plain.length);
+    from = m.index + m[0].length;
   }
-  return { plain, hits };
+  return { plain: plain + t.slice(from), hits };
 }
 
 // At most `max` characters of a paragraph: the stretch holding the most hits,
