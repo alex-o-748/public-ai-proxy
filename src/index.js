@@ -81,8 +81,10 @@ const INSIDE_POST = "}}}";
 // A book's OCR files. Their name before the suffix is the book's `doc`: the
 // item's identifier, or for an item holding several books, each book's own.
 const BOOK_TEXT_SUFFIXES = ["_djvu.txt", "_djvu.xml", "_hocr_searchtext.txt.gz"];
-// inside.php's answer when it has no word positions for that `doc`.
+// inside.php's answer when it has no word positions for that `doc`, and when
+// the item's text is not in its index yet.
 const NO_LAYOUT = /no hocr or abbyy/i;
+const NOT_INDEXED = /not yet indexed/i;
 const insideBuckets = new Map();
 
 // Qwen3 models are reasoning models: they may prepend their chain-of-thought
@@ -253,7 +255,9 @@ async function searchInsideTerm(server, id, doc, dir, term) {
   }
   const matches = data && Array.isArray(data.matches) ? data.matches : [];
   if (!matches.length && data && data.error) {
-    return NO_LAYOUT.test(String(data.error)) ? { noLayout: true } : { error: String(data.error).slice(0, 200) };
+    if (NO_LAYOUT.test(String(data.error))) return { noLayout: true };
+    if (NOT_INDEXED.test(String(data.error))) return { notIndexed: true };
+    return { error: String(data.error).slice(0, 200) };
   }
   return { matches };
 }
@@ -416,7 +420,7 @@ async function archiveInside(url, ip, cors) {
   if (results.some((r) => r.restricted)) {
     return archiveError(403, "restricted", "Only open books can be searched inside: this one is lent, or restricted", cors, 3600);
   }
-  if (results.every((r) => r.noLayout)) {
+  if (results.every((r) => r.noLayout || r.notIndexed)) {
     return archiveError(404, "no_text", "The Archive has no searchable text for this book", cors, 3600);
   }
   if (results.every((r) => !r.matches)) {

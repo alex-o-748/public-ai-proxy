@@ -28,6 +28,7 @@ function stubArchive(t, items) {
       if (item.restricted) return new Response("", { status: 403 });
       const book = item.books[url.searchParams.get("doc")];
       if (!book) return json({ error: "No hOCR or Abbyy file present", matches: [] });
+      if (book.unindexed) return json({ ia: "x", q: url.searchParams.get("q"), matches: [], error: "This item is not yet indexed in the full-text search engine." });
       const q = url.searchParams.get("q");
       if (book.fail && book.fail.includes(q)) throw Object.assign(new Error("timed out"), { name: "TimeoutError" });
       return json({ ia: "x", q, indexed: true, matches: (book.matches[q] || []).map(([leaf, text, leafEnd]) => ({
@@ -148,6 +149,15 @@ test("a lending-library book is refused, an unknown item is not found", async (t
   const missing = await inside("id=nosuchitem&q=funeral");
   assert.equal(missing.res.status, 404);
   assert.equal(missing.body.error.code, "not_found");
+});
+
+test("a book whose text the Archive has not indexed yet has no searchable text", async (t) => {
+  stubArchive(t, {
+    newscan: { server: "ia802807.us.archive.org", dir: "/3/items/newscan", files: ["newscan_djvu.txt"], books: { newscan: { unindexed: true, matches: {} } } },
+  });
+  const { res, body } = await inside("id=newscan&q=Bashkardi&q=branch");
+  assert.equal(res.status, 404);
+  assert.equal(body.error.code, "no_text");
 });
 
 test("rejects what is not an identifier, a book outside the item, or too many terms", async (t) => {
