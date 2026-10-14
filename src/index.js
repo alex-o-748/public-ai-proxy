@@ -178,6 +178,46 @@ function sanitizeRating(value) {
   return value === 1 || value === -1 ? value : null;
 }
 
+// ===== /cnfirmed/log payload sanitization =====
+// One row per finished CNfirmed search (one stage, for one claim), with the
+// sources it found as a JSONB array. Same trust model as /log: everything is
+// coerced or truncated, never rejected.
+const CNFIRMED_STAGES = new Set(["wiki", "books", "web"]);
+const CNFIRMED_STATUSES = new Set(["done", "error"]);
+// Each stage's verdicts, in one vocabulary: a web verdict's SUPPORTED is
+// "supports", and so on (the user script maps them). "lead" is a Wikipedia
+// citation nothing read; "unchecked" a book whose check gave no verdict.
+const CNFIRMED_VERDICTS = new Set([
+  "supports",
+  "partial",
+  "unsupported",
+  "topic",
+  "unrelated",
+  "unavailable",
+  "lead",
+  "unchecked",
+]);
+const CNFIRMED_ORIGINS = new Set(["web", "book", "same-article", "sister-wiki"]);
+const CNFIRMED_RELIABILITY = new Set(["high", "medium", "low"]);
+const CNFIRMED_MAX_SOURCES = 25;
+
+function sanitizeCnfirmedSources(value) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .slice(0, CNFIRMED_MAX_SOURCES)
+    .filter((s) => s && typeof s === "object")
+    .map((s) => ({
+      url: sanitizeString(s.url, 2000),
+      title: sanitizeString(s.title, 500),
+      origin: sanitizeEnum(s.origin, CNFIRMED_ORIGINS),
+      lang: sanitizeString(s.lang, 16),
+      verdict: sanitizeEnum(s.verdict, CNFIRMED_VERDICTS),
+      confidence: sanitizeConfidence(s.confidence),
+      reliability: sanitizeEnum(s.reliability, CNFIRMED_RELIABILITY),
+      quote: sanitizeString(s.quote, 1000),
+    }));
+}
+
 // Reads and JSON-parses a request body, enforcing a size cap first so an
 // oversized body can't be fully buffered just to get rejected. Returns
 // { body } on success or { errorResponse } to return as-is.
@@ -238,7 +278,7 @@ export default {
 
     // Preflight — /log and /feedback need open CORS since they're called from Wikipedia
     if (request.method === "OPTIONS") {
-      if (url.pathname === '/log' || url.pathname === '/feedback') {
+      if (url.pathname === '/log' || url.pathname === '/feedback' || url.pathname === '/cnfirmed/log') {
         return new Response(null, {
           status: 204,
           headers: {
@@ -374,6 +414,59 @@ export default {
       }
 
       return new Response('ok', { headers: feedbackCors });
+    }
+
+    // ===== /cnfirmed/log endpoint — write a CNfirmed search to Neon =====
+    // Fire-and-forget, like /log: the user script never waits on it, and a
+    // bad body or a failed write still answers ok.
+    if (url.pathname === '/cnfirmed/log' && request.method === 'POST') {
+      const logCors = { 'Access-Control-Allow-Origin': '*' };
+      const raw = await request.text();
+      if (raw.length > TELEMETRY_MAX_BODY_BYTES) {
+        return new Response('ok', { headers: logCors });
+      }
+      let body;
+      try {
+        body = JSON.parse(raw);
+      } catch {
+        return new Response('ok', { headers: logCors });
+      }
+      if (body && typeof body === 'object') {
+        const sources = sanitizeCnfirmedSources(body.sources);
+        // Counted here, not taken from the client, so the column agrees
+        // with the array next to it.
+        const supported = sources.filter(
+          (s) => s.verdict === 'supports' || s.verdict === 'partial'
+        ).length;
+        ctx.waitUntil(
+          queryNeon(
+            env.DATABASE_URL,
+            `INSERT INTO cnfirmed_searches
+              (search_id, wiki, article_title, revision_id, claim_index, claim_text, section,
+               stage, provider, model, status, error, source_count, supported_count, sources)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15::jsonb)
+             ON CONFLICT (search_id) DO NOTHING`,
+            [
+              sanitizeString(body.search_id, 64),
+              sanitizeString(body.wiki, 32),
+              sanitizeString(body.article_title, 2000),
+              sanitizeConfidence(body.revision_id),
+              sanitizeConfidence(body.claim_index),
+              sanitizeString(body.claim_text, 4000),
+              sanitizeString(body.section, 500),
+              sanitizeEnum(body.stage, CNFIRMED_STAGES),
+              sanitizeString(body.provider, 64),
+              sanitizeString(body.model, 200),
+              sanitizeEnum(body.status, CNFIRMED_STATUSES),
+              sanitizeString(body.error, 2000),
+              sources.length,
+              supported,
+              JSON.stringify(sources),
+            ]
+          ).catch(err => console.error('CNfirmed log write failed:', err.message))
+        );
+      }
+      return new Response('ok', { headers: logCors });
     }
 
     // ===== GET /tavily — are free (shared-key) searches available? =====

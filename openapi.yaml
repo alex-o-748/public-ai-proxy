@@ -167,6 +167,37 @@ paths:
         '204':
           description: CORS preflight accepted
 
+  /cnfirmed/log:
+    post:
+      operationId: logCnfirmedSearch
+      summary: Log a finished CNfirmed search
+      description: |
+        Persists one finished CNfirmed search (one stage, for one claim) to the
+        Neon `cnfirmed_searches` table, with the sources it found. Same
+        contract as `/log`: non-blocking (`waitUntil`), open CORS (`*`), and
+        always `200 ok`, so a `200` confirms receipt only.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CnfirmedSearchLogRequest'
+      responses:
+        '200':
+          description: Request received, whether or not a row was written.
+          content:
+            text/plain:
+              schema:
+                type: string
+                enum: [ok]
+
+    options:
+      operationId: corsPreflightCnfirmedLog
+      summary: CORS preflight for /cnfirmed/log
+      responses:
+        '204':
+          description: CORS preflight accepted
+
 components:
   schemas:
     # ── Chat completion (pass-through to PublicAI / OpenAI-compatible) ─────────
@@ -481,6 +512,95 @@ components:
             was shown. The client always sends one of the seven values, so a
             stored `NULL` means the value was dropped or the enum was violated.
           example: "partial"
+
+    CnfirmedSearchLogRequest:
+      type: object
+      description: |
+        One finished search for one `{{citation needed}}` claim. Every field is
+        coerced rather than rejected: a wrong type stores `NULL`, a long string
+        is truncated, an unknown enum value stores `NULL`.
+      properties:
+        search_id:
+          type: string
+          maxLength: 64
+          description: Client-generated id. The insert is `ON CONFLICT (search_id) DO NOTHING`.
+          example: "k3v9q2x7m1"
+        wiki:
+          type: string
+          maxLength: 32
+          description: The wiki's subdomain (`en`, `simple`, `de`…).
+          example: "en"
+        article_title:
+          type: string
+          maxLength: 2000
+          example: "Eiffel_Tower"
+        revision_id:
+          type: [integer, "null"]
+          description: The article revision the claim was read from.
+          example: 1302216593
+        claim_index:
+          type: [integer, "null"]
+          description: Which `{{citation needed}}` tag on the page, from 0, in document order.
+          example: 2
+        claim_text:
+          type: [string, "null"]
+          maxLength: 4000
+          example: "The tower was the tallest structure in the world until 1930."
+        section:
+          type: [string, "null"]
+          maxLength: 500
+          example: "History"
+        stage:
+          type: string
+          enum: [wiki, books, web]
+          description: |
+            `wiki`: citations already on Wikipedia. `books`: the Internet
+            Archive. `web`: the web search.
+        provider:
+          type: [string, "null"]
+          maxLength: 64
+          description: The web search's provider (`claude`, `gemini`, `openai`, `tavilyhf`); `null` otherwise.
+        model:
+          type: [string, "null"]
+          maxLength: 200
+          description: The web search's model, or what checked the books (a model, or `verify-api`).
+        status:
+          type: string
+          enum: [done, error]
+        error:
+          type: [string, "null"]
+          maxLength: 2000
+        sources:
+          type: array
+          maxItems: 25
+          description: |
+            Every source the search returned, including those it judged not
+            to support the claim. Items past the 25th are dropped.
+            `source_count` and `supported_count` are computed from this array
+            by the Worker.
+          items:
+            type: object
+            properties:
+              url: { type: [string, "null"], maxLength: 2000 }
+              title: { type: [string, "null"], maxLength: 500 }
+              origin:
+                type: [string, "null"]
+                enum: [web, book, same-article, sister-wiki, null]
+              lang:
+                type: [string, "null"]
+                maxLength: 16
+                description: For a `sister-wiki` lead, the wiki it was cited on.
+              verdict:
+                type: [string, "null"]
+                enum: [supports, partial, unsupported, topic, unrelated, unavailable, lead, unchecked, null]
+              confidence: { type: [number, "null"] }
+              reliability:
+                type: [string, "null"]
+                enum: [high, medium, low, null]
+              quote:
+                type: [string, "null"]
+                maxLength: 1000
+                description: The passage or quote the verdict rests on, or the sentence a lead was cited for.
 
     # ── Shared error shape ─────────────────────────────────────────────────────
 

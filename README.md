@@ -25,6 +25,7 @@ A Cloudflare Worker that proxies requests to the [PublicAI](https://publicai.co)
 | `POST` | `/liftwing` | Proxies chat completions to Wikimedia Lift Wing (allowlisted Qwen models only) |
 | `POST` | `/log` | Logs a citation verification result to the database |
 | `POST` | `/feedback` | Logs a user rating or verdict correction for a check |
+| `POST` | `/cnfirmed/log` | Logs a finished CNfirmed search and the sources it found |
 | `GET` | `/?fetch=<url>` | Fetches and extracts text content from a URL |
 | `GET` | `/?ping` | Returns timestamp, IP, and CORS status |
 | `GET` | `/?neon=test` | Tests the Neon database connection |
@@ -211,6 +212,67 @@ ever records a username or IP address.
 
 Update the allowlists in `src/index.js` (`KIND_VALUES`, `VERDICT_VALUES`) if
 the client adds new `kind` or verdict values.
+
+### CNfirmed searches (`/cnfirmed/log`)
+
+[CNfirmed](https://github.com/alex-o-748/source-finder) finds sources for
+`{{citation needed}}` claims in three searches: citations already on Wikipedia
+(`wiki`), Internet Archive books (`books`), and the web (`web`). Its user
+script posts each search here when it finishes, one row per search per claim,
+with every source it returned in a JSONB array. Same contract as `/log`:
+fire-and-forget, always `200`, no username or IP.
+
+Create the table before deploying the Worker version that writes it (the
+insert runs inside `waitUntil()`, so a missing table fails silently):
+
+```sql
+CREATE TABLE IF NOT EXISTS cnfirmed_searches (
+  id SERIAL PRIMARY KEY,
+  ts TIMESTAMPTZ DEFAULT now(),
+  search_id TEXT UNIQUE,     -- minted client-side
+  wiki TEXT,                 -- subdomain: 'en', 'simple', 'de'…
+  article_title TEXT,
+  revision_id BIGINT,        -- the revision the claim was read from
+  claim_index INT,           -- which {{cn}} on the page, from 0
+  claim_text TEXT,
+  section TEXT,
+  stage TEXT,                -- 'wiki' | 'books' | 'web'
+  provider TEXT,             -- web only: 'claude' | 'gemini' | 'openai' | 'tavilyhf'
+  model TEXT,                -- web model, or what checked the books
+  status TEXT,               -- 'done' | 'error'
+  error TEXT,
+  source_count INT,          -- computed by the Worker from sources
+  supported_count INT,       -- sources with verdict 'supports' or 'partial'
+  sources JSONB              -- [{url, title, origin, lang, verdict, confidence, reliability, quote}]
+);
+
+CREATE INDEX IF NOT EXISTS cnfirmed_searches_page_idx
+  ON cnfirmed_searches (wiki, article_title, revision_id);
+```
+
+`sources` holds every source the search returned, including those judged not
+to support the claim (`unsupported`, `topic`, `unrelated`): which candidates a
+stage rejects says as much about it as which it keeps. A source's `verdict` is
+one vocabulary across stages — `supports`, `partial`, `unsupported`, `topic`,
+`unrelated`, `unavailable` (a web page that could not be read), `lead` (a
+Wikipedia citation nothing read) or `unchecked` (a book the check gave no
+verdict on). Anything else stores `null`.
+
+```sql
+-- How often each search finds something that supports the claim
+SELECT stage,
+       count(*)                                  AS searches,
+       count(*) FILTER (WHERE supported_count > 0) AS supported,
+       count(*) FILTER (WHERE source_count > 0)    AS any_source
+FROM cnfirmed_searches
+WHERE status = 'done'
+GROUP BY stage;
+
+-- Every supporting source, one row each
+SELECT s.article_title, s.claim_text, src->>'url' AS url, src->>'verdict' AS verdict
+FROM cnfirmed_searches s, jsonb_array_elements(s.sources) AS src
+WHERE src->>'verdict' IN ('supports', 'partial');
+```
 
 ## Development
 
