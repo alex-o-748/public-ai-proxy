@@ -16,7 +16,8 @@ const HF_ALLOWED_MODELS = new Set([
 ]);
 const HF_MAX_TOKENS = 16384;
 const HF_MAX_BODY_BYTES = 200 * 1024;
-const HF_UPSTREAM_TIMEOUT_MS = 60_000;
+// A check of a dozen books' passages can take GLM-5.2 more than a minute.
+const HF_UPSTREAM_TIMEOUT_MS = 120_000;
 
 // ===== Tavily relay settings =====
 const TAVILY_MAX_BODY_BYTES = 16 * 1024;
