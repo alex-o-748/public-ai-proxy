@@ -1,4 +1,5 @@
 import { extractText as extractPdfText, getDocumentProxy } from "unpdf";
+import { decodeHtml } from "./charset.js";
 
 // ===== Rate limit settings =====
 const RATE_LIMIT = 20;        // requests
@@ -458,7 +459,9 @@ export default {
               });
           }
 
-          const html = await response.text();
+          // Not response.text(), which always decodes UTF-8: a Windows-1251 or
+          // KOI8-R page came back as a wall of U+FFFD. See src/charset.js.
+          const { text: html } = decodeHtml(await response.arrayBuffer(), contentType);
           const content = extractText(html);
 
           return new Response(JSON.stringify({ content }), {
