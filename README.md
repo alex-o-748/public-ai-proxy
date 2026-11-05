@@ -12,6 +12,7 @@ A Cloudflare Worker that proxies requests to the [PublicAI](https://publicai.co)
 - **Verification Logging** — `/log` endpoint records citation verification results to a Neon PostgreSQL database
 - **Feedback** — `/feedback` endpoint records user ratings and verdict corrections to a Neon PostgreSQL database
 - **URL Fetching** — `?fetch=<url>` extracts text content from external pages (scripts, styles, nav stripped; 100k char limit)
+  - For PDFs, `&page=<n>` (1-based) returns only that page's text, read directly from PDF.js (`getPage(n).getTextContent()`), with the same whitespace collapse and 100k char limit. **Before this fix, `page` was silently ignored:** the code passed `{ pages: [n] }` to unpdf's `extractText()`, which has no such option and always extracts every page, so `page=N` got the document from page 1 up to the 100k cap while the response still said `"page": N`.
 - **Debug Endpoints** — `?ping` for reachability checks, `?neon=test` for database connectivity
 
 ## Endpoints
@@ -28,6 +29,14 @@ A Cloudflare Worker that proxies requests to the [PublicAI](https://publicai.co)
 | `GET` | `/?fetch=<url>` | Fetches and extracts text content from a URL |
 | `GET` | `/?ping` | Returns timestamp, IP, and CORS status |
 | `GET` | `/?neon=test` | Tests the Neon database connection |
+
+## Tests
+
+```bash
+npm test
+```
+
+Runs `node --test` on `test/*.test.js`. `test/fetchPdf.test.js` drives the Worker's `?fetch=` handler under Node, with the outbound `fetch()` stubbed to serve a bundled three-page PDF (`test/fixtures/three-pages.pdf`). It checks that `page=2` returns only page 2's text with `page: 2`, that omitting `page` returns every page, and that an out-of-range page is a 400.
 
 ## Setup
 

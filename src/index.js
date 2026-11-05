@@ -217,6 +217,18 @@ async function queryNeon(databaseUrl, sql, params = []) {
   return resp.json();
 }
 
+// Text of one 1-based PDF page, built the way unpdf builds each page's text:
+// item strings concatenated, with a newline wherever PDF.js marks an end of
+// line.
+async function extractPdfPageText(pdf, pageNum) {
+  const page = await pdf.getPage(pageNum);
+  const { items } = await page.getTextContent();
+  return items
+    .filter((item) => typeof item.str === 'string')
+    .map((item) => item.str + (item.hasEOL ? '\n' : ''))
+    .join('');
+}
+
 export default {
   async fetch(request, env, ctx) {
     const origin = request.headers.get("Origin") || "";
@@ -431,9 +443,9 @@ export default {
 
               const pdf = await getDocumentProxy(new Uint8Array(buf));
 
-              let pages;
+              let pageNum = null;
               if (pageParam) {
-                  const pageNum = parseInt(pageParam, 10);
+                  pageNum = parseInt(pageParam, 10);
                   if (isNaN(pageNum) || pageNum < 1 || pageNum > pdf.numPages) {
                       return new Response(JSON.stringify({
                           error: `Invalid page number. PDF has ${pdf.numPages} pages.`
@@ -442,17 +454,23 @@ export default {
                           headers: { ...corsHeaders, 'Content-Type': 'application/json' }
                       });
                   }
-                  pages = [pageNum];
               }
 
-              const { text } = await extractPdfText(pdf, { mergePages: true, pages });
+              // unpdf's extractText() has no page selector: it only reads
+              // `mergePages` and always walks every page, so passing
+              // `{ pages: [n] }` used to be silently ignored and `page=N` got
+              // the whole document from page 1, labelled as page N. Read the
+              // one requested page straight from PDF.js instead.
+              const text = pageNum === null
+                  ? (await extractPdfText(pdf, { mergePages: true })).text
+                  : await extractPdfPageText(pdf, pageNum);
               const content = text.replace(/\s+/g, ' ').trim().substring(0, 100000);
 
               return new Response(JSON.stringify({
                   content,
                   pdf: true,
                   totalPages: pdf.numPages,
-                  ...(pageParam ? { page: parseInt(pageParam, 10) } : {}),
+                  ...(pageNum !== null ? { page: pageNum } : {}),
               }), {
                   headers: { ...corsHeaders, 'Content-Type': 'application/json' }
               });
