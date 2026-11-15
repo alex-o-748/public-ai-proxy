@@ -11,7 +11,7 @@ A Cloudflare Worker that proxies requests to the [PublicAI](https://publicai.co)
 - **CORS** — Configured for Wikipedia origins (`en.wikipedia.org`, `www.wikipedia.org`, `commons.wikimedia.org`)
 - **Verification Logging** — `/log` endpoint records citation verification results to a Neon PostgreSQL database
 - **Feedback** — `/feedback` endpoint records user ratings and verdict corrections to a Neon PostgreSQL database
-- **URL Fetching** — `?fetch=<url>` extracts text content from external pages (scripts, styles, nav stripped; 100k char limit)
+- **URL Fetching** — `?fetch=<url>` extracts text content from external pages (scripts, styles, nav stripped; 100k char limit). A rating graphic's `aria-label`/`alt` ("3 out of 5 stars") is kept as text (`src/ratingLabels.js`, same rule as tf-source-fetcher)
 - **Debug Endpoints** — `?ping` for reachability checks, `?neon=test` for database connectivity
 
 ## Endpoints

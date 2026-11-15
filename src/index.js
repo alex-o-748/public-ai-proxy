@@ -1,5 +1,6 @@
 import { extractText as extractPdfText, getDocumentProxy } from "unpdf";
 import { decodeHtml } from "./charset.js";
+import { keepRatingLabels } from "./ratingLabels.js";
 
 // ===== Rate limit settings =====
 const RATE_LIMIT = 20;        // requests
@@ -807,9 +808,11 @@ export default {
 };
 
 function extractText(html) {
-  return html
+  // keepRatingLabels: a star rating drawn as a graphic has its score only in
+  // an aria-label or alt, which tag stripping would drop. See src/ratingLabels.js.
+  return keepRatingLabels(html
     .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, '')
-    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, ''))
     .replace(/<nav[^>]*>[\s\S]*?<\/nav>/gi, '')
     .replace(/<header[^>]*>[\s\S]*?<\/header>/gi, '')
     .replace(/<footer[^>]*>[\s\S]*?<\/footer>/gi, '')
